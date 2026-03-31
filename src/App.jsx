@@ -1,0 +1,830 @@
+import { useState, useCallback } from "react";
+
+// ─── API KEYS (from .env) ─────────────────────────────────────────────────────
+const GOOGLE_KEY     = import.meta.env.VITE_GOOGLE_KEY;
+
+// Fixed transit fare (TransLink Zone 1)
+const TRANSIT_FARE = 3.15;
+
+// Driving cost: Vancouver avg gas ~$1.75/L, ~10L/100km = $0.175/km
+// + ~$0.05/km wear & tear = $0.225/km total
+const DRIVING_COST_PER_KM = 0.225;
+
+// CO₂ kg per km by mode
+const CO2_PER_KM = { driving: 0.21, transit: 0.04, walking: 0, bicycling: 0 };
+
+// ─── GEOCODING ────────────────────────────────────────────────────────────────
+
+async function geocode(address) {
+  const url = `/maps-api/maps/api/geocode/json?address=${encodeURIComponent(address)}&region=ca&key=${GOOGLE_KEY}`;
+  const res  = await fetch(url);
+  const data = await res.json();
+  if (data.status !== "OK") throw new Error(`Geocode failed: ${data.status}`);
+  const loc = data.results[0].geometry.location;
+  return { lat: loc.lat, lng: loc.lng, formatted: data.results[0].formatted_address };
+}
+
+// ─── GOOGLE DIRECTIONS ────────────────────────────────────────────────────────
+
+async function fetchGoogleDirections(originStr, destStr, mode, extra = {}) {
+  const params = new URLSearchParams({
+    origin:       originStr,
+    destination:  destStr,
+    mode,
+    alternatives: "true",
+    region:       "ca",
+    key:          GOOGLE_KEY,
+    ...(mode === "transit" ? { transit_mode: "bus|subway|rail" } : {}),
+    ...extra,
+  });
+  const res  = await fetch(`/maps-api/maps/api/directions/json?${params}`);
+  const data = await res.json();
+  if (data.status !== "OK" && data.status !== "ZERO_RESULTS") {
+    throw new Error(`Directions API: ${data.status}`);
+  }
+  return data.routes || [];
+}
+
+// ─── ROUTE PARSER ─────────────────────────────────────────────────────────────
+
+function stripHtml(html) {
+  return html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function modeIcon(travelMode, vehicleType) {
+  if (travelMode === "WALKING")   return "🚶";
+  if (travelMode === "DRIVING")   return "🚗";
+  if (travelMode === "BICYCLING") return "🚴";
+  if (travelMode === "TRANSIT") {
+    const t = (vehicleType || "").toLowerCase();
+    if (t.includes("subway") || t.includes("metro") || t.includes("skytrain")) return "🚇";
+    if (t.includes("rail") || t.includes("commuter")) return "🚆";
+    return "🚌";
+  }
+  return "🚌";
+}
+
+function parseGoogleRoute(googleRoute, routeType, idPrefix) {
+  const leg = googleRoute.legs[0];
+
+  const steps = leg.steps.map(step => {
+    const td          = step.transit_details;
+    const vehicleType = td?.line?.vehicle?.type;
+    const lineName    = td?.line?.short_name || td?.line?.name || "";
+    const headsign    = td?.headsign || "";
+    const desc = td
+      ? `${lineName ? lineName + " – " : ""}${headsign || stripHtml(step.html_instructions)}`
+      : stripHtml(step.html_instructions);
+
+    return {
+      mode:          step.travel_mode.toLowerCase(),
+      desc,
+      duration:      Math.round(step.duration.value / 60),
+      distanceKm:    Math.round(step.distance.value / 100) / 10,
+      icon:          modeIcon(step.travel_mode, vehicleType),
+      transitLine:   lineName,
+      departureStop: td?.departure_stop?.name,
+      arrivalStop:   td?.arrival_stop?.name,
+    };
+  });
+
+  const walkMin   = steps.filter(s => s.mode === "walking").reduce((s, x) => s + x.duration, 0);
+  const transfers = Math.max(0, steps.filter(s => s.mode === "transit").length - 1);
+
+  const co2 = leg.steps.reduce((sum, step) => {
+    const km     = step.distance.value / 1000;
+    const factor = CO2_PER_KM[step.travel_mode.toLowerCase()] ?? 0.1;
+    return sum + km * factor;
+  }, 0);
+
+  return {
+    id:           `${idPrefix}_${Math.random().toString(36).slice(2, 7)}`,
+    label:        googleRoute.summary || `${routeType} route`,
+    type:         routeType,
+    duration:     Math.round(leg.duration.value / 60),
+    distanceKm:   Math.round(leg.distance.value / 100) / 10,
+    walkMin,
+    cost:         routeType === "transit" ? TRANSIT_FARE
+                : routeType === "driving"  ? Math.round(leg.distance.value / 1000 * DRIVING_COST_PER_KM * 100) / 100
+                : TRANSIT_FARE, // drive+transit: just the fare (driving leg already short)
+    transfers,
+    steps,
+    co2:          Math.round(co2 * 10) / 10,
+    source:       "google",
+    departureTime: leg.departure_time?.text || null,
+    arrivalTime:   leg.arrival_time?.text   || null,
+  };
+}
+
+// ─── MAIN ROUTE FETCHER ───────────────────────────────────────────────────────
+
+async function fetchAllRoutes(originStr, destStr, setLoadingMsg) {
+  const routes = [];
+
+  setLoadingMsg("Geocoding addresses…");
+  const [originCoords, destCoords] = await Promise.all([
+    geocode(originStr),
+    geocode(destStr),
+  ]);
+
+  setLoadingMsg("Fetching transit & driving routes from Google Maps…");
+  const [transitRes, drivingRes] = await Promise.allSettled([
+    fetchGoogleDirections(originStr, destStr, "transit"),
+    fetchGoogleDirections(originStr, destStr, "driving"),
+  ]);
+
+  if (transitRes.status === "fulfilled")
+    transitRes.value.forEach(r => routes.push(parseGoogleRoute(r, "transit", "transit")));
+  if (drivingRes.status === "fulfilled")
+    drivingRes.value.forEach(r => routes.push(parseGoogleRoute(r, "driving", "driving")));
+
+  if (routes.length === 0) throw new Error("No routes found between those locations.");
+
+  return { routes, originCoords, destCoords };
+}
+
+// ─── WEIGHTED COST FUNCTION ───────────────────────────────────────────────────
+
+function computeRouteCost(route, prefs, w) {
+  const timeScore     = route.duration / 90;
+  const walkScore     = route.walkMin  / 30;
+  const moneyScore    = route.cost / 20; // driving can reach $15-20+ so normalize to 20
+  const transferScore = route.transfers / 4;
+  const ecoScore      = route.co2 / 15;
+  return w.time * timeScore + w.walk * walkScore + w.money * moneyScore
+       + w.transfers * transferScore + w.eco * ecoScore;
+}
+
+function buildWeights(prefs) {
+  const total = prefs.timeWeight + prefs.walkWeight + prefs.costWeight + prefs.ecoWeight;
+  return {
+    time: prefs.timeWeight / total, walk: prefs.walkWeight / total,
+    money: prefs.costWeight / total, eco: prefs.ecoWeight / total,
+    transfers: 0.08,
+  };
+}
+
+function rankRoutes(routes, prefs, w) {
+  return [...routes].map(r => ({ ...r, score: computeRouteCost(r, prefs, w) }))
+    .sort((a, b) => a.score - b.score);
+}
+
+// ─── BAYESIAN UPDATE ──────────────────────────────────────────────────────────
+
+function bayesianUpdate(prefs, chosen, all) {
+  const np = { ...prefs };
+  const STEP = 6, DECAY = 0.97;
+  if (chosen.walkMin <= 5)
+    np.walkWeight = Math.min(100, np.walkWeight + STEP);
+  if (chosen.duration === Math.min(...all.map(r => r.duration)))
+    np.timeWeight = Math.min(100, np.timeWeight + STEP);
+  if (chosen.co2 < 1.5)
+    np.ecoWeight = Math.min(100, np.ecoWeight + STEP);
+  if (chosen.cost === Math.min(...all.map(r => r.cost)))
+    np.costWeight = Math.min(100, np.costWeight + STEP);
+  ["timeWeight","walkWeight","costWeight","ecoWeight"].forEach(k => {
+    np[k] = np[k] * DECAY + prefs[k] * (1 - DECAY);
+  });
+  return np;
+}
+
+// ─── DEFAULT PREFERENCES ─────────────────────────────────────────────────────
+
+const DEFAULT_PREFS = {
+  timeWeight: 60, walkWeight: 40, costWeight: 50, ecoWeight: 20,
+};
+
+// ─── GOOGLE MAPS EMBED ────────────────────────────────────────────────────────
+// Uses the Google Maps Embed API to show a real interactive route map.
+
+// Embed API only supports one travel mode per request.
+
+function RouteMap({ route, origin, destination }) {
+  const embedMode = (route?.type === "driving" || route?.type === "drive+transit")
+    ? "driving" : "transit";
+
+  const embedDest = destination;
+
+  const src = `https://www.google.com/maps/embed/v1/directions`
+    + `?key=${GOOGLE_KEY}`
+    + `&origin=${encodeURIComponent(origin)}`
+    + `&destination=${encodeURIComponent(embedDest)}`
+    + `&mode=${embedMode}`
+    + `&region=ca`;
+
+  return (
+    <iframe
+      key={src}
+      src={src}
+      width="100%"
+      height="100%"
+      style={{ border:"none", display:"block", width:"100%", height:"100%" }}
+      allowFullScreen
+      loading="lazy"
+      referrerPolicy="no-referrer-when-downgrade"
+    />
+  );
+}
+
+
+// ─── SLIDER ───────────────────────────────────────────────────────────────────
+
+function Slider({ label, value, onChange, color, icon, desc }) {
+  return (
+    <div style={{ marginBottom:"20px" }}>
+      <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", marginBottom:"5px" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:"8px" }}>
+          <span>{icon}</span>
+          <span style={{ fontSize:"13px", fontWeight:"600", color:"#cbd5e1" }}>{label}</span>
+        </div>
+        <span style={{ fontSize:"12px", fontWeight:"700", color, background:`${color}20`, padding:"2px 8px", borderRadius:"20px" }}>{value}</span>
+      </div>
+      {desc && <p style={{ fontSize:"11px", color:"#475569", margin:"0 0 7px 24px" }}>{desc}</p>}
+      <div style={{ position:"relative", height:"6px" }}>
+        <div style={{ position:"absolute", inset:0, background:"#1e293b", borderRadius:"3px" }} />
+        <div style={{ position:"absolute", left:0, top:0, bottom:0, width:`${value}%`,
+          background:`linear-gradient(90deg,${color}80,${color})`, borderRadius:"3px", transition:"width .15s" }} />
+        <input type="range" min={0} max={100} value={value} onChange={e=>onChange(+e.target.value)}
+          style={{ position:"absolute", inset:0, width:"100%", height:"100%", opacity:0, cursor:"pointer", margin:0 }} />
+      </div>
+    </div>
+  );
+}
+
+// ─── ROUTE CARD ───────────────────────────────────────────────────────────────
+
+function RouteCard({ route, isOptimal, isSelected, onSelect }) {
+  const [open, setOpen] = useState(false);
+  const colors = { transit:"#3b82f6", driving:"#f59e0b", "drive+transit":"#10b981" };
+  const col = colors[route.type] || "#64748b";
+
+  return (
+    <div onClick={()=>onSelect(route)} style={{
+      background: isSelected?"#0f2235":"#0d1b2a",
+      border:`1.5px solid ${isSelected?col:isOptimal?`${col}55`:"#1e3348"}`,
+      borderRadius:"12px", padding:"10px 12px", cursor:"pointer",
+      transition:"all .2s", position:"relative", overflow:"hidden",
+      boxShadow: isSelected?`0 0 22px ${col}30`:isOptimal?`0 0 12px ${col}15`:"none",
+    }}>
+      {isOptimal && (
+        <div style={{ position:"absolute", top:0, right:0,
+          background:`linear-gradient(135deg,${col},${col}bb)`,
+          color:"#000", fontSize:"10px", fontWeight:"800",
+          padding:"4px 10px", borderBottomLeftRadius:"10px",
+          letterSpacing:".05em", fontFamily:"monospace" }}>★ OPTIMAL</div>
+      )}
+
+      <div style={{ display:"flex", alignItems:"center", gap:"10px", marginBottom:"10px" }}>
+        <div style={{ width:"32px", height:"32px", borderRadius:"8px", background:`${col}20`,
+          display:"flex", alignItems:"center", justifyContent:"center", fontSize:"16px", flexShrink:0 }}>
+          {route.steps[0]?.icon}
+        </div>
+        <div style={{ flex:1 }}>
+          <div style={{ fontSize:"13px", fontWeight:"700", color:"#e2e8f0" }}>{route.label}</div>
+          <div style={{ fontSize:"11px", color:"#64748b", marginTop:"1px" }}>
+            {[...new Set(route.steps.map(s=>s.mode))].join(" → ")}
+          </div>
+        </div>
+        <div style={{ textAlign:"right" }}>
+          <div style={{ fontSize:"18px", fontWeight:"800", color:col, fontFamily:"monospace" }}>
+            {route.duration}<span style={{ fontSize:"11px", fontWeight:"400", color:"#64748b" }}> min</span>
+          </div>
+          {route.arrivalTime && (
+            <div style={{ fontSize:"10px", color:"#475569" }}>arr. {route.arrivalTime}</div>
+          )}
+        </div>
+      </div>
+
+      <div style={{ display:"flex", gap:"6px", flexWrap:"wrap" }}>
+        {[
+          [`${route.walkMin} min walk`, "#94a3b8"],
+          [`${route.co2} kg CO₂`, route.co2<2?"#34d399":"#94a3b8"],
+          [route.transfers===0?"Direct":`${route.transfers} transfer${route.transfers>1?"s":""}`, "#94a3b8"],
+          [route.type === "driving"
+            ? `⛽ $${route.cost.toFixed(2)} est.`
+            : `🎟 $${route.cost.toFixed(2)}`,
+           route.type === "driving" ? "#f59e0b" : "#94a3b8"],
+        ].map(([label,color],i)=>(
+          <div key={i} style={{ fontSize:"11px", color, background:"#0a1628",
+            padding:"3px 8px", borderRadius:"6px" }}>{label}</div>
+        ))}
+      </div>
+
+
+      <div style={{ marginTop:"10px", display:"flex", alignItems:"center", gap:"8px" }}>
+        <span style={{ fontSize:"10px", color:"#475569", fontFamily:"monospace", width:"68px" }}>
+          score {(1-route.score).toFixed(3)}
+        </span>
+        <div style={{ flex:1, height:"3px", background:"#1e293b", borderRadius:"2px" }}>
+          <div style={{ height:"100%", width:`${(1-route.score)*100}%`,
+            background:`linear-gradient(90deg,${col}60,${col})`,
+            borderRadius:"2px", transition:"width .5s" }} />
+        </div>
+      </div>
+
+      <button onClick={e=>{e.stopPropagation();setOpen(!open)}} style={{
+        marginTop:"10px", background:"none", border:"none", color:"#475569",
+        fontSize:"11px", cursor:"pointer", display:"flex", alignItems:"center", gap:"4px", padding:0
+      }}>
+        <span style={{ display:"inline-block", transition:"transform .2s", transform:open?"rotate(180deg)":"none" }}>▾</span>
+        {open?"Hide":"Show"} steps
+      </button>
+
+      {open && (
+        <div style={{ marginTop:"10px", borderTop:"1px solid #1e293b", paddingTop:"10px" }}>
+          {route.steps.map((s,i)=>(
+            <div key={i} style={{ display:"flex", gap:"10px", marginBottom:"8px", alignItems:"flex-start" }}>
+              <div style={{ width:"26px", height:"26px", borderRadius:"6px", background:"#0a1628",
+                display:"flex", alignItems:"center", justifyContent:"center", fontSize:"14px", flexShrink:0 }}>
+                {s.icon}
+              </div>
+              <div>
+                <div style={{ fontSize:"12px", color:"#cbd5e1" }}>{s.desc}</div>
+                <div style={{ fontSize:"11px", color:"#475569" }}>
+                  {s.duration > 0 ? `${s.duration} min` : ""}
+                  {s.departureStop ? ` · from ${s.departureStop}` : ""}
+                  {s.arrivalStop   ? ` → ${s.arrivalStop}` : ""}
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── SMALL HELPERS ────────────────────────────────────────────────────────────
+
+function Notif({ msg, color }) {
+  return (
+    <div style={{ position:"fixed", top:"14px", left:"50%", transform:"translateX(-50%)",
+      background:color, color:"#000", padding:"9px 18px", borderRadius:"10px",
+      fontSize:"13px", fontWeight:"600", zIndex:1000,
+      boxShadow:"0 4px 20px #00000060", whiteSpace:"nowrap", pointerEvents:"none" }}>
+      {msg}
+    </div>
+  );
+}
+
+function NavBtn({ onClick, children, title }) {
+  return (
+    <button onClick={onClick} title={title} style={{ background:"#0d1b2a", border:"1px solid #1e3348",
+      color:"#94a3b8", borderRadius:"10px", padding:"8px 10px",
+      cursor:"pointer", fontSize:"16px", lineHeight:1 }}>{children}</button>
+  );
+}
+
+function LocInput({ label, dot, value, onChange, placeholder }) {
+  return (
+    <div style={{ marginBottom:"4px" }}>
+      <label style={{ fontSize:"10px", color:"#475569", display:"block",
+        marginBottom:"5px", fontFamily:"monospace" }}>{label}</label>
+      <div style={{ position:"relative" }}>
+        <div style={{ position:"absolute", left:"12px", top:"50%", transform:"translateY(-50%)",
+          width:"7px", height:"7px", borderRadius:"50%",
+          background:dot, boxShadow:`0 0 7px ${dot}` }} />
+        <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+          style={{ width:"100%", padding:"11px 11px 11px 30px", background:"#0a1628",
+            border:"1px solid #1e3348", borderRadius:"9px", color:"#e2e8f0",
+            fontSize:"13px", outline:"none", boxSizing:"border-box",
+            fontFamily:"'DM Sans',sans-serif" }} />
+      </div>
+    </div>
+  );
+}
+
+function Spinner() {
+  return (
+    <span style={{ display:"inline-block", width:"13px", height:"13px",
+      border:"2px solid #ffffff30", borderTopColor:"#fff",
+      borderRadius:"50%", animation:"spin .8s linear infinite" }} />
+  );
+}
+
+const globalStyles = `
+  @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;600;700;800&family=DM+Mono&display=swap');
+  *, *::before, *::after { box-sizing: border-box; }
+  html, body, #root { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; }
+  input::placeholder { color: #334155; }
+  input { caret-color: #3b82f6; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  ::-webkit-scrollbar { width: 4px; }
+  ::-webkit-scrollbar-track { background: #0a1628; }
+  ::-webkit-scrollbar-thumb { background: #1e3348; border-radius: 2px; }
+`;
+
+// ─── MAIN APP ─────────────────────────────────────────────────────────────────
+
+export default function App() {
+  const [screen,       setScreen]       = useState("setup");
+  const [prefs,        setPrefs]        = useState(DEFAULT_PREFS);
+  const [origin,       setOrigin]       = useState("");
+  const [dest,         setDest]         = useState("");
+  const [loading,      setLoading]      = useState(false);
+  const [loadingMsg,   setLoadingMsg]   = useState("");
+  const [error,        setError]        = useState(null);
+  const [routes,       setRoutes]       = useState([]);
+  const [selected,     setSelected]     = useState(null);
+  const [originCoords, setOriginCoords] = useState(null);
+  const [history,      setHistory]      = useState([]);
+  const [bayesLog,     setBayesLog]     = useState([]);
+  const [tripCount,    setTripCount]    = useState(0);
+  const [notif,        setNotif]        = useState(null);
+
+  const weights = buildWeights(prefs);
+  const setPref = key => val => setPrefs(p => ({ ...p, [key]: val }));
+
+  const notify = (msg, color = "#22c55e") => {
+    setNotif({ msg, color });
+    setTimeout(() => setNotif(null), 3500);
+  };
+
+  // ── SEARCH ──────────────────────────────────────────────────────────────────
+  const search = useCallback(async () => {
+    if (!origin || !dest) return;
+    setLoading(true); setError(null); setRoutes([]); setSelected(null);
+    try {
+      const { routes: raw, originCoords: oc } =
+        await fetchAllRoutes(origin, dest, setLoadingMsg);
+      const ranked = rankRoutes(raw, prefs, weights);
+      setRoutes(ranked);
+      setSelected(ranked[0]);
+      setOriginCoords(oc);
+      setScreen("results");
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false); setLoadingMsg("");
+    }
+  }, [origin, dest, prefs, weights]);
+
+  // ── CONFIRM ─────────────────────────────────────────────────────────────────
+  const confirm = useCallback(() => {
+    if (!selected) return;
+    const updated = bayesianUpdate(prefs, selected, routes);
+    const changes = [];
+    ["timeWeight","walkWeight","costWeight","ecoWeight"].forEach(k => {
+      if (Math.abs(updated[k] - prefs[k]) > 0.5)
+        changes.push(`${k}: ${prefs[k].toFixed(1)} → ${updated[k].toFixed(1)}`);
+    });
+    setPrefs(updated);
+    setBayesLog(l => [...l, {
+      trip: tripCount + 1, route: selected.label, changes,
+      date: new Date().toLocaleDateString("en-CA", { month:"short", day:"numeric" }),
+    }]);
+    setHistory(h => [{
+      from: origin, to: dest,
+      date: new Date().toLocaleDateString("en-CA", { month:"short", day:"numeric" }),
+      chosen: selected.label,
+    }, ...h]);
+    setTripCount(t => t + 1);
+    notify("Route confirmed! Preferences updated 🧠");
+    setScreen("main"); setOrigin(""); setDest("");
+  }, [selected, prefs, routes, origin, dest, tripCount]);
+
+  const SUGGESTIONS = [
+    ["Burnaby, BC",              "Vancouver General Hospital, Vancouver"],
+    ["Metrotown, Burnaby, BC",   "Downtown Vancouver, BC"],
+    ["Richmond Centre, BC",      "SFU Burnaby, BC"],
+    ["Lougheed Town Centre, BC", "Vancouver International Airport"],
+  ];
+
+  // ── SETUP ────────────────────────────────────────────────────────────────────
+  if (screen === "setup") return (
+    <div style={{ minHeight:"100vh", background:"#050d1a", display:"flex", alignItems:"center",
+      justifyContent:"center", padding:"20px", fontFamily:"'DM Sans',sans-serif",
+      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
+      <div style={{ width:"100%", maxWidth:"420px" }}>
+        <div style={{ textAlign:"center", marginBottom:"28px" }}>
+          <div style={{ display:"inline-flex", alignItems:"center", justifyContent:"center",
+            width:"60px", height:"60px", borderRadius:"16px",
+            background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+            marginBottom:"14px", boxShadow:"0 0 40px #1d4ed840", fontSize:"26px" }}>🚇</div>
+          <h1 style={{ fontSize:"26px", fontWeight:"800", color:"#f1f5f9", margin:0, letterSpacing:"-0.02em" }}>TransitAI</h1>
+          <p style={{ color:"#475569", fontSize:"12px", margin:"5px 0 0" }}>Metro Vancouver · Live Personalized Routes</p>
+        </div>
+        <div style={{ background:"#0d1b2a", borderRadius:"20px", border:"1px solid #1e3348",
+          padding:"26px", boxShadow:"0 20px 60px #00000060" }}>
+          <h2 style={{ fontSize:"15px", fontWeight:"700", color:"#e2e8f0", margin:"0 0 4px" }}>Set your preferences</h2>
+          <p style={{ fontSize:"12px", color:"#475569", margin:"0 0 20px" }}>
+            These define your cost function. The app adapts weights via Bayesian updates as you use it.
+          </p>
+          <Slider label="Speed Priority"    value={prefs.timeWeight}     onChange={setPref("timeWeight")}      color="#3b82f6" icon="⚡" desc="Prefer faster routes?" />
+          <Slider label="Minimize Walking"  value={prefs.walkWeight}     onChange={setPref("walkWeight")}      color="#f59e0b" icon="🚶" desc="Avoid long walks?" />
+          <Slider label="Cost Sensitivity"  value={prefs.costWeight}     onChange={setPref("costWeight")}      color="#22c55e" icon="💸" desc="Avoid expensive options?" />
+          <Slider label="Eco Preference"    value={prefs.ecoWeight}      onChange={setPref("ecoWeight")}       color="#34d399" icon="🌱" desc="Prefer lower CO₂?" />
+          <div style={{ background:"#0a1628", borderRadius:"10px", padding:"10px 12px",
+            marginBottom:"18px", border:"1px solid #1e3348" }}>
+            <div style={{ fontSize:"10px", color:"#475569", marginBottom:"7px", fontFamily:"monospace" }}>NORMALIZED COST WEIGHTS</div>
+            <div style={{ display:"flex", gap:"6px", flexWrap:"wrap" }}>
+              {[["time",weights.time,"#3b82f6"],["walk",weights.walk,"#f59e0b"],
+                ["cost",weights.money,"#22c55e"],["eco",weights.eco,"#34d399"]].map(([k,v,c])=>(
+                <div key={k} style={{ fontSize:"11px", color:c, background:`${c}15`,
+                  padding:"2px 8px", borderRadius:"6px", fontFamily:"monospace" }}>
+                  {k}: {v.toFixed(3)}
+                </div>
+              ))}
+            </div>
+          </div>
+          <button onClick={()=>setScreen("main")} style={{
+            width:"100%", padding:"13px",
+            background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+            border:"none", borderRadius:"12px", color:"#fff",
+            fontSize:"14px", fontWeight:"700", cursor:"pointer", boxShadow:"0 4px 20px #1d4ed840"
+          }}>Start Navigating →</button>
+        </div>
+      </div>
+      <style>{globalStyles}</style>
+    </div>
+  );
+
+  // ── HISTORY ──────────────────────────────────────────────────────────────────
+  if (screen === "history") return (
+    <div style={{ minHeight:"100vh", background:"#050d1a", padding:"20px",
+      fontFamily:"'DM Sans',sans-serif",
+      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
+      <div style={{ maxWidth:"480px", margin:"0 auto" }}>
+        <div style={{ display:"flex", alignItems:"center", gap:"12px", marginBottom:"22px" }}>
+          <button onClick={()=>setScreen("main")} style={{ background:"#0d1b2a",
+            border:"1px solid #1e3348", color:"#94a3b8", borderRadius:"10px",
+            padding:"7px 12px", cursor:"pointer", fontSize:"13px" }}>← Back</button>
+          <h2 style={{ fontSize:"17px", fontWeight:"700", color:"#e2e8f0", margin:0 }}>Trip History</h2>
+        </div>
+
+        {bayesLog.length > 0 && (
+          <div style={{ background:"#0d1b2a", borderRadius:"16px", border:"1px solid #1e3348",
+            padding:"14px", marginBottom:"18px" }}>
+            <div style={{ fontSize:"12px", fontWeight:"700", color:"#a78bfa", marginBottom:"10px" }}>
+              🧠 Bayesian Learning Log
+            </div>
+            {bayesLog.map((e,i)=>(
+              <div key={i} style={{ background:"#0a1628", borderRadius:"10px",
+                padding:"9px 11px", marginBottom:"7px", border:"1px solid #1e3348" }}>
+                <div style={{ fontSize:"12px", fontWeight:"600", color:"#cbd5e1" }}>
+                  Trip #{e.trip} — {e.route}{" "}
+                  <span style={{ color:"#475569", fontWeight:"400" }}>({e.date})</span>
+                </div>
+                {e.changes.length > 0
+                  ? e.changes.map((c,j)=>(
+                    <div key={j} style={{ fontSize:"11px", color:"#22c55e",
+                      marginTop:"3px", fontFamily:"monospace" }}>↑ {c}</div>
+                  ))
+                  : <div style={{ fontSize:"11px", color:"#475569", marginTop:"3px" }}>No significant weight changes</div>
+                }
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ background:"#0d1b2a", borderRadius:"16px", border:"1px solid #1e3348",
+          padding:"14px", marginBottom:"18px" }}>
+          <div style={{ fontSize:"11px", color:"#475569", marginBottom:"10px", fontFamily:"monospace" }}>
+            CURRENT WEIGHTS ({tripCount} trips learned)
+          </div>
+          {[["Speed",prefs.timeWeight,"#3b82f6"],["Min Walk",prefs.walkWeight,"#f59e0b"],
+            ["Cost",prefs.costWeight,"#22c55e"],["Eco",prefs.ecoWeight,"#34d399"]].map(([l,v,c])=>(
+            <div key={l} style={{ marginBottom:"8px" }}>
+              <div style={{ display:"flex", justifyContent:"space-between", marginBottom:"3px" }}>
+                <span style={{ fontSize:"12px", color:"#94a3b8" }}>{l}</span>
+                <span style={{ fontSize:"12px", color:c, fontFamily:"monospace" }}>{v.toFixed(1)}</span>
+              </div>
+              <div style={{ height:"3px", background:"#1e293b", borderRadius:"2px" }}>
+                <div style={{ height:"100%", width:`${v}%`, background:c, borderRadius:"2px" }} />
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {history.length > 0 && (
+          <>
+            <div style={{ fontSize:"11px", color:"#475569", marginBottom:"9px", fontFamily:"monospace" }}>
+              PAST TRIPS ({history.length})
+            </div>
+            {history.map((t,i)=>(
+              <div key={i} style={{ background:"#0d1b2a", borderRadius:"12px",
+                border:"1px solid #1e3348", padding:"11px 13px", marginBottom:"7px",
+                display:"flex", alignItems:"center", gap:"11px" }}>
+                <div style={{ width:"34px", height:"34px", borderRadius:"9px", background:"#0a1628",
+                  display:"flex", alignItems:"center", justifyContent:"center", fontSize:"17px" }}>
+                  {t.chosen.includes("Drive")?"🚗":"🚇"}
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{t.from} → {t.to}</div>
+                  <div style={{ fontSize:"11px", color:"#475569", marginTop:"2px" }}>{t.chosen}</div>
+                </div>
+                <div style={{ fontSize:"11px", color:"#475569" }}>{t.date}</div>
+              </div>
+            ))}
+          </>
+        )}
+      </div>
+      <style>{globalStyles}</style>
+    </div>
+  );
+
+  // ── RESULTS ──────────────────────────────────────────────────────────────────
+  if (screen === "results") return (
+    <div style={{ height:"100vh", width:"100vw", display:"flex", flexDirection:"column",
+      background:"#050d1a", fontFamily:"'DM Sans',sans-serif",
+      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
+      {notif && <Notif {...notif} />}
+
+      {/* Top bar */}
+      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+        padding:"12px 18px", borderBottom:"1px solid #1e3348",
+        background:"#0a1628", flexShrink:0 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:"14px" }}>
+          <span style={{ fontSize:"20px" }}>🚇</span>
+          <div>
+            <div style={{ fontSize:"12px", fontWeight:"700", color:"#e2e8f0" }}>
+              {origin} <span style={{ color:"#334155" }}>→</span> {dest}
+            </div>
+            <div style={{ fontSize:"11px", color:"#475569" }}>
+              {routes.length} routes · Live data · Google Maps
+            </div>
+          </div>
+        </div>
+        <button onClick={()=>setScreen("main")} style={{ background:"#0d1b2a",
+          border:"1px solid #1e3348", color:"#94a3b8",
+          borderRadius:"8px", padding:"7px 12px", cursor:"pointer", fontSize:"12px" }}>← Back</button>
+      </div>
+
+      {/* Side-by-side body */}
+      <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
+
+        {/* LEFT — scrollable routes panel */}
+        <div style={{ width:"320px", flexShrink:0, overflowY:"auto",
+          borderRight:"1px solid #1e3348", padding:"14px",
+          display:"flex", flexDirection:"column", gap:"10px" }}>
+
+          {routes.map((r,i)=>(
+            <RouteCard key={r.id} route={r} isOptimal={i===0}
+              isSelected={selected?.id===r.id} onSelect={setSelected} />
+          ))}
+
+          {selected && (
+            <div style={{ marginTop:"4px", paddingBottom:"8px" }}>
+              <button onClick={confirm} style={{
+                width:"100%", padding:"14px",
+                background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+                border:"none", borderRadius:"13px", color:"#fff",
+                fontSize:"14px", fontWeight:"700", cursor:"pointer",
+                boxShadow:"0 4px 24px #1d4ed840"
+              }}>✓ Go with {selected.label}</button>
+              <p style={{ textAlign:"center", fontSize:"11px", color:"#475569", marginTop:"7px" }}>
+                Your choice updates your Bayesian preference weights
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* RIGHT — full-height map */}
+        <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
+          <RouteMap route={selected} origin={origin} destination={dest} />
+
+          {/* Origin/dest overlay */}
+          <div style={{ position:"absolute", top:"12px", left:"12px",
+            background:"#050d1aee", backdropFilter:"blur(8px)",
+            borderRadius:"10px", padding:"8px 12px", border:"1px solid #1e3348",
+            pointerEvents:"none" }}>
+            <div style={{ fontSize:"10px", color:"#64748b" }}>FROM</div>
+            <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{origin}</div>
+            <div style={{ fontSize:"10px", color:"#64748b", marginTop:"3px" }}>TO</div>
+            <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{dest}</div>
+          </div>
+
+          {/* Coords overlay */}
+          {originCoords && (
+            <div style={{ position:"absolute", bottom:"12px", right:"12px",
+              background:"#050d1aee", backdropFilter:"blur(6px)",
+              borderRadius:"8px", padding:"5px 9px", border:"1px solid #1e3348",
+              pointerEvents:"none" }}>
+              <span style={{ fontSize:"10px", color:"#475569", fontFamily:"monospace" }}>
+                {originCoords.lat.toFixed(4)}, {originCoords.lng.toFixed(4)}
+              </span>
+            </div>
+          )}
+
+          {/* Selected route mode badge */}
+          {selected && (
+            <div style={{ position:"absolute", bottom:"12px", left:"12px",
+              background:"#050d1aee", backdropFilter:"blur(6px)",
+              borderRadius:"8px", padding:"6px 10px", border:"1px solid #1e3348",
+              pointerEvents:"none", display:"flex", alignItems:"center", gap:"6px" }}>
+              <span style={{ fontSize:"13px" }}>{selected.steps[0]?.icon}</span>
+              <span style={{ fontSize:"11px", fontWeight:"600", color:"#e2e8f0" }}>{selected.label}</span>
+              <span style={{ fontSize:"11px", color:"#475569" }}>· {selected.duration} min</span>
+            </div>
+          )}
+        </div>
+      </div>
+      <style>{globalStyles}</style>
+    </div>
+  );
+
+  // ── MAIN ─────────────────────────────────────────────────────────────────────
+  return (
+    <div style={{ minHeight:"100vh", background:"#050d1a", fontFamily:"'DM Sans',sans-serif",
+      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
+      {notif && <Notif {...notif} />}
+      <div style={{ maxWidth:"480px", margin:"0 auto", padding:"22px 18px" }}>
+
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"26px" }}>
+          <div>
+            <h1 style={{ fontSize:"22px", fontWeight:"800", color:"#f1f5f9", margin:0, letterSpacing:"-0.02em" }}>
+              🚇 TransitAI
+            </h1>
+            <p style={{ fontSize:"12px", color:"#475569", margin:"3px 0 0" }}>
+              Metro Vancouver · {tripCount} trips learned
+            </p>
+          </div>
+          <div style={{ display:"flex", gap:"7px" }}>
+            <NavBtn onClick={()=>setScreen("history")} title="History">🕐</NavBtn>
+            <NavBtn onClick={()=>setScreen("setup")}   title="Settings">⚙️</NavBtn>
+          </div>
+        </div>
+
+        <div style={{ background:"#0d1b2a", borderRadius:"20px", border:"1px solid #1e3348",
+          padding:"18px", marginBottom:"18px", boxShadow:"0 8px 40px #00000050" }}>
+          <LocInput label="FROM" dot="#22c55e" value={origin} onChange={setOrigin} placeholder="Enter origin address…" />
+          <div style={{ display:"flex", alignItems:"center", margin:"8px 0", gap:"10px" }}>
+            <div style={{ flex:1, height:"1px", background:"#1e3348" }} />
+            <button onClick={()=>{const t=origin;setOrigin(dest);setDest(t)}}
+              style={{ background:"#0a1628", border:"1px solid #1e3348", color:"#64748b",
+                borderRadius:"8px", padding:"5px 10px", cursor:"pointer", fontSize:"14px" }}>⇅</button>
+            <div style={{ flex:1, height:"1px", background:"#1e3348" }} />
+          </div>
+          <LocInput label="TO" dot="#ef4444" value={dest} onChange={setDest} placeholder="Enter destination address…" />
+
+          {error && (
+            <div style={{ marginTop:"10px", padding:"9px 12px", background:"#2d1515",
+              border:"1px solid #7f1d1d", borderRadius:"9px", fontSize:"12px", color:"#fca5a5" }}>
+              ⚠ {error}
+            </div>
+          )}
+
+          <button onClick={search} disabled={!origin||!dest||loading} style={{
+            marginTop:"14px", width:"100%", padding:"13px",
+            background:(!origin||!dest)?"#1e293b":"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+            border:"none", borderRadius:"12px",
+            color:(!origin||!dest)?"#475569":"#fff",
+            fontSize:"14px", fontWeight:"700",
+            cursor:(!origin||!dest||loading)?"not-allowed":"pointer",
+            transition:"all .2s", display:"flex", alignItems:"center", justifyContent:"center", gap:"8px"
+          }}>
+            {loading
+              ? <><Spinner />{loadingMsg || "Fetching routes…"}</>
+              : "🔍 Find Routes"}
+          </button>
+        </div>
+
+        <div style={{ marginBottom:"22px" }}>
+          <div style={{ fontSize:"11px", color:"#475569", marginBottom:"9px", fontFamily:"monospace" }}>QUICK ROUTES</div>
+          <div style={{ display:"flex", flexDirection:"column", gap:"7px" }}>
+            {SUGGESTIONS.map(([f,t],i)=>(
+              <button key={i} onClick={()=>{setOrigin(f);setDest(t)}} style={{
+                background:"#0d1b2a", border:"1px solid #1e3348", borderRadius:"11px",
+                padding:"9px 13px", cursor:"pointer", textAlign:"left",
+                display:"flex", alignItems:"center", gap:"9px"
+              }}>
+                <span style={{ fontSize:"15px" }}>🗺</span>
+                <div style={{ fontSize:"12px", fontWeight:"600", color:"#cbd5e1" }}>{f} → {t}</div>
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ background:"#0d1b2a", borderRadius:"16px", border:"1px solid #1e3348", padding:"14px" }}>
+          <div style={{ display:"flex", alignItems:"center", gap:"8px", marginBottom:"11px" }}>
+            <span>🧠</span>
+            <span style={{ fontSize:"13px", fontWeight:"700", color:"#a78bfa" }}>Personalization Profile</span>
+            <span style={{ fontSize:"10px", color:"#a78bfa", background:"#a78bfa20",
+              padding:"2px 7px", borderRadius:"10px", marginLeft:"auto", fontFamily:"monospace" }}>
+              {tripCount} trips
+            </span>
+          </div>
+          <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:"7px" }}>
+            {[["⚡ Speed",prefs.timeWeight,"#3b82f6"],["🚶 Min Walk",prefs.walkWeight,"#f59e0b"],
+              ["💸 Save $",prefs.costWeight,"#22c55e"],["🌱 Eco",prefs.ecoWeight,"#34d399"]].map(([l,v,c])=>(
+              <div key={l} style={{ background:"#0a1628", borderRadius:"9px",
+                padding:"9px 11px", border:"1px solid #1e3348" }}>
+                <div style={{ display:"flex", justifyContent:"space-between", marginBottom:"5px" }}>
+                  <span style={{ fontSize:"11px", color:"#64748b" }}>{l}</span>
+                  <span style={{ fontSize:"11px", color:c, fontFamily:"monospace" }}>{v.toFixed(0)}</span>
+                </div>
+                <div style={{ height:"3px", background:"#1e293b", borderRadius:"2px" }}>
+                  <div style={{ height:"100%", width:`${v}%`, background:c, borderRadius:"2px" }} />
+                </div>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize:"11px", color:"#334155", margin:"10px 0 0", textAlign:"center" }}>
+            Weights adapt as you choose routes
+          </p>
+        </div>
+      </div>
+      <style>{globalStyles}</style>
+    </div>
+  );
+}
