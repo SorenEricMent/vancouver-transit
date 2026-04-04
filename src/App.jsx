@@ -225,46 +225,110 @@ const DARK_MAP_STYLES = [
   { featureType: "landscape",             elementType: "geometry",     stylers: [{ color: "#0d1b2a" }] },
 ];
 
+// ─── POLYLINE DECODER ─────────────────────────────────────────────────────────
+// Decodes a Google Maps encoded polyline string into [{lat, lng}] points.
+
+function decodePolyline(encoded) {
+  const points = [];
+  let index = 0, lat = 0, lng = 0;
+  while (index < encoded.length) {
+    let b, shift = 0, result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+    shift = 0; result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+    points.push({ lat: lat / 1e5, lng: lng / 1e5 });
+  }
+  return points;
+}
+
 // ─── GOOGLE MAPS ROUTE MAP ────────────────────────────────────────────────────
-// Uses the Google Maps JavaScript API + DirectionsRenderer to draw the exact
-// selected route polyline instead of re-routing via the Embed API.
+// Draws the exact selected route by decoding overview_polyline from the raw
+// Directions API response and rendering it as google.maps.Polyline overlays.
 
 function RouteMap({ route }) {
   const containerRef = useRef(null);
   const mapRef       = useRef(null);
-  const rendererRef  = useRef(null);
   const [ready, setReady] = useState(false);
 
-  // Initialize the map once the JS SDK is loaded.
+  // Initialize the map once.
   useEffect(() => {
     let cancelled = false;
     loadMapsJs(GOOGLE_KEY).then(() => {
       if (cancelled || !containerRef.current || mapRef.current) return;
       mapRef.current = new window.google.maps.Map(containerRef.current, {
         zoom: 12,
-        center: { lat: 49.2827, lng: -123.1207 }, // Metro Vancouver
+        center: { lat: 49.2827, lng: -123.1207 },
         styles: DARK_MAP_STYLES,
         zoomControl: true,
         streetViewControl: false,
         mapTypeControl: false,
         fullscreenControl: false,
       });
-      rendererRef.current = new window.google.maps.DirectionsRenderer();
-      rendererRef.current.setMap(mapRef.current);
       setReady(true);
     });
     return () => { cancelled = true; };
   }, []);
 
-  // Re-draw whenever the selected route changes.
+  // Draw the route whenever the selection changes.
   useEffect(() => {
-    if (!ready || !route?.rawRoute || !rendererRef.current) return;
-    rendererRef.current.setDirections({
-      geocoded_waypoints: [],
-      routes: [route.rawRoute],
-      status: "OK",
+    if (!ready || !route?.rawRoute || !mapRef.current) return;
+    const map = mapRef.current;
+    const leg = route.rawRoute.legs[0];
+    const overlays = [];
+
+    // ── Polylines ──────────────────────────────────────────────────────────
+    if (route.type === "transit") {
+      // Draw each step individually so walking legs look different from transit legs.
+      leg.steps.forEach(step => {
+        const pts = step.polyline?.points ? decodePolyline(step.polyline.points) : [];
+        if (!pts.length) return;
+        const isWalk = step.travel_mode === "WALKING";
+        overlays.push(new window.google.maps.Polyline({
+          path: pts,
+          strokeColor:   isWalk ? "#64748b" : "#3b82f6",
+          strokeWeight:  isWalk ? 3 : 5,
+          strokeOpacity: isWalk ? 0.55 : 0.9,
+          map,
+        }));
+      });
+    } else {
+      const pts = route.rawRoute.overview_polyline?.points
+        ? decodePolyline(route.rawRoute.overview_polyline.points) : [];
+      if (pts.length) {
+        overlays.push(new window.google.maps.Polyline({
+          path: pts, strokeColor: "#f59e0b",
+          strokeWeight: 5, strokeOpacity: 0.9, map,
+        }));
+      }
+    }
+
+    // ── Origin / destination markers ──────────────────────────────────────
+    [
+      { pos: leg.start_location, color: "#22c55e" },
+      { pos: leg.end_location,   color: "#ef4444" },
+    ].forEach(({ pos, color }) => {
+      overlays.push(new window.google.maps.Marker({
+        position: pos, map,
+        icon: {
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 8, fillColor: color, fillOpacity: 1,
+          strokeColor: "#fff", strokeWeight: 2,
+        },
+      }));
     });
-    rendererRef.current.setRouteIndex(0);
+
+    // ── Fit bounds to the route ───────────────────────────────────────────
+    const bounds = new window.google.maps.LatLngBounds();
+    const overviewPts = route.rawRoute.overview_polyline?.points
+      ? decodePolyline(route.rawRoute.overview_polyline.points) : [];
+    (overviewPts.length ? overviewPts : [leg.start_location, leg.end_location])
+      .forEach(p => bounds.extend(p));
+    map.fitBounds(bounds, { top: 50, right: 50, bottom: 50, left: 50 });
+
+    // Cleanup: remove all overlays when route changes or component unmounts.
+    return () => overlays.forEach(o => o.setMap(null));
   }, [ready, route]);
 
   return (
