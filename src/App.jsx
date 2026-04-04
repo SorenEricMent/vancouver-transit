@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 
 // ─── API KEYS (from .env) ─────────────────────────────────────────────────────
 const GOOGLE_KEY     = import.meta.env.VITE_GOOGLE_KEY;
@@ -113,6 +113,7 @@ function parseGoogleRoute(googleRoute, routeType, idPrefix) {
     source:       "google",
     departureTime: leg.departure_time?.text || null,
     arrivalTime:   leg.arrival_time?.text   || null,
+    rawRoute:     googleRoute,
   };
 }
 
@@ -194,35 +195,81 @@ const DEFAULT_PREFS = {
   timeWeight: 60, walkWeight: 40, costWeight: 50, ecoWeight: 20,
 };
 
-// ─── GOOGLE MAPS EMBED ────────────────────────────────────────────────────────
-// Uses the Google Maps Embed API to show a real interactive route map.
+// ─── GOOGLE MAPS JS API LOADER ────────────────────────────────────────────────
 
-// Embed API only supports one travel mode per request.
+let _mapsApiPromise = null;
+function loadMapsJs(key) {
+  if (_mapsApiPromise) return _mapsApiPromise;
+  _mapsApiPromise = new Promise(resolve => {
+    if (window.google?.maps?.Map) { resolve(); return; }
+    window.__gmapsReady = resolve;
+    const s = document.createElement("script");
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${key}&callback=__gmapsReady&loading=async`;
+    document.head.appendChild(s);
+  });
+  return _mapsApiPromise;
+}
 
-function RouteMap({ route, origin, destination }) {
-  const embedMode = (route?.type === "driving" || route?.type === "drive+transit")
-    ? "driving" : "transit";
+const DARK_MAP_STYLES = [
+  { elementType: "geometry",              stylers: [{ color: "#0d1b2a" }] },
+  { elementType: "labels.text.fill",      stylers: [{ color: "#64748b" }] },
+  { elementType: "labels.text.stroke",    stylers: [{ color: "#0a1628" }] },
+  { featureType: "road",                  elementType: "geometry",     stylers: [{ color: "#1e3348" }] },
+  { featureType: "road.highway",          elementType: "geometry",     stylers: [{ color: "#253f5a" }] },
+  { featureType: "road",                  elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
+  { featureType: "water",                 elementType: "geometry",     stylers: [{ color: "#050d1a" }] },
+  { featureType: "transit",              elementType: "geometry",     stylers: [{ color: "#1e3348" }] },
+  { featureType: "poi",                   stylers: [{ visibility: "off" }] },
+  { featureType: "administrative",        elementType: "geometry",     stylers: [{ color: "#1e3348" }] },
+  { featureType: "administrative.locality", elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
+  { featureType: "landscape",             elementType: "geometry",     stylers: [{ color: "#0d1b2a" }] },
+];
 
-  const embedDest = destination;
+// ─── GOOGLE MAPS ROUTE MAP ────────────────────────────────────────────────────
+// Uses the Google Maps JavaScript API + DirectionsRenderer to draw the exact
+// selected route polyline instead of re-routing via the Embed API.
 
-  const src = `https://www.google.com/maps/embed/v1/directions`
-    + `?key=${GOOGLE_KEY}`
-    + `&origin=${encodeURIComponent(origin)}`
-    + `&destination=${encodeURIComponent(embedDest)}`
-    + `&mode=${embedMode}`
-    + `&region=ca`;
+function RouteMap({ route }) {
+  const containerRef = useRef(null);
+  const mapRef       = useRef(null);
+  const rendererRef  = useRef(null);
+  const [ready, setReady] = useState(false);
+
+  // Initialize the map once the JS SDK is loaded.
+  useEffect(() => {
+    let cancelled = false;
+    loadMapsJs(GOOGLE_KEY).then(() => {
+      if (cancelled || !containerRef.current || mapRef.current) return;
+      mapRef.current = new window.google.maps.Map(containerRef.current, {
+        zoom: 12,
+        center: { lat: 49.2827, lng: -123.1207 }, // Metro Vancouver
+        styles: DARK_MAP_STYLES,
+        zoomControl: true,
+        streetViewControl: false,
+        mapTypeControl: false,
+        fullscreenControl: false,
+      });
+      rendererRef.current = new window.google.maps.DirectionsRenderer();
+      rendererRef.current.setMap(mapRef.current);
+      setReady(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Re-draw whenever the selected route changes.
+  useEffect(() => {
+    if (!ready || !route?.rawRoute || !rendererRef.current) return;
+    rendererRef.current.setDirections({
+      geocoded_waypoints: [],
+      routes: [route.rawRoute],
+      status: "OK",
+    });
+    rendererRef.current.setRouteIndex(0);
+  }, [ready, route]);
 
   return (
-    <iframe
-      key={src}
-      src={src}
-      width="100%"
-      height="100%"
-      style={{ border:"none", display:"block", width:"100%", height:"100%" }}
-      allowFullScreen
-      loading="lazy"
-      referrerPolicy="no-referrer-when-downgrade"
-    />
+    <div ref={containerRef}
+      style={{ width: "100%", height: "100%", background: "#0d1b2a" }} />
   );
 }
 
@@ -681,7 +728,7 @@ export default function App() {
 
         {/* RIGHT — full-height map */}
         <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
-          <RouteMap route={selected} origin={origin} destination={dest} />
+          <RouteMap route={selected} />
 
           {/* Origin/dest overlay */}
           <div style={{ position:"absolute", top:"12px", left:"12px",
