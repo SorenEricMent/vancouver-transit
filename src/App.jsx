@@ -3,6 +3,11 @@ import { useState, useCallback, useEffect, useRef } from "react";
 // ─── API KEYS (from .env) ─────────────────────────────────────────────────────
 const GOOGLE_KEY     = import.meta.env.VITE_GOOGLE_KEY;
 
+// Pre-load the Maps JS SDK immediately so Places autocomplete is ready by the
+// time the user starts typing — not deferred until the map renders.
+// eslint-disable-next-line no-use-before-define
+setTimeout(() => loadMapsJs(GOOGLE_KEY), 0);
+
 // Fixed transit fare (TransLink Zone 1)
 const TRANSIT_FARE = 3.15;
 
