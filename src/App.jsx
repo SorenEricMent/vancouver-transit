@@ -252,7 +252,7 @@ function decodePolyline(encoded) {
 // Draws the exact selected route by decoding overview_polyline from the raw
 // Directions API response and rendering it as google.maps.Polyline overlays.
 
-function RouteMap({ route, userLocation }) {
+function RouteMap({ route, userLocation, bottomPadding = 50 }) {
   const containerRef    = useRef(null);
   const mapRef          = useRef(null);
   const locMarkerRef    = useRef(null);
@@ -332,7 +332,7 @@ function RouteMap({ route, userLocation }) {
       ? decodePolyline(route.rawRoute.overview_polyline.points) : [];
     (overviewPts.length ? overviewPts : [leg.start_location, leg.end_location])
       .forEach(p => bounds.extend(p));
-    map.fitBounds(bounds, { top: 50, right: 50, bottom: 50, left: 50 });
+    map.fitBounds(bounds, { top: 50, right: 50, bottom: bottomPadding, left: 50 });
 
     // Cleanup: remove all overlays when route changes or component unmounts.
     return () => overlays.forEach(o => o.setMap(null));
@@ -657,6 +657,18 @@ const globalStyles = `
   ::-webkit-scrollbar-thumb { background: #1e3348; border-radius: 2px; }
 `;
 
+// ─── MOBILE HOOK ─────────────────────────────────────────────────────────────
+
+function useIsMobile() {
+  const [mobile, setMobile] = useState(() => window.innerWidth < 640);
+  useEffect(() => {
+    const fn = () => setMobile(window.innerWidth < 640);
+    window.addEventListener("resize", fn);
+    return () => window.removeEventListener("resize", fn);
+  }, []);
+  return mobile;
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -675,6 +687,8 @@ export default function App() {
   const [tripCount,    setTripCount]    = useState(0);
   const [notif,        setNotif]        = useState(null);
   const [userLocation, setUserLocation] = useState(null);
+  const [sheetOpen,    setSheetOpen]    = useState(false);
+  const isMobile = useIsMobile();
 
   // Request geolocation on mount and watch for updates.
   useEffect(() => {
@@ -710,6 +724,7 @@ export default function App() {
       setRoutes(ranked);
       setSelected(ranked[0]);
       setOriginCoords(oc);
+      setSheetOpen(false);
       setScreen("results");
     } catch (e) {
       setError(e.message);
@@ -883,104 +898,166 @@ export default function App() {
   );
 
   // ── RESULTS ──────────────────────────────────────────────────────────────────
-  if (screen === "results") return (
-    <div style={{ height:"100vh", width:"100vw", display:"flex", flexDirection:"column",
-      background:"#050d1a", fontFamily:"'DM Sans',sans-serif",
-      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
-      {notif && <Notif {...notif} />}
+  if (screen === "results") {
+    const SHEET_PEEK = "158px";
+    const SHEET_FULL = "70vh";
 
-      {/* Top bar */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
-        padding:"12px 18px", borderBottom:"1px solid #1e3348",
-        background:"#0a1628", flexShrink:0 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:"14px" }}>
-          <span style={{ fontSize:"20px" }}>🚇</span>
-          <div>
-            <div style={{ fontSize:"12px", fontWeight:"700", color:"#e2e8f0" }}>
-              {origin} <span style={{ color:"#334155" }}>→</span> {dest}
-            </div>
-            <div style={{ fontSize:"11px", color:"#475569" }}>
-              {routes.length} routes · Live data · Google Maps
-            </div>
+    // Shared route list + confirm button used in both layouts.
+    const routeList = (
+      <>
+        {routes.map((r,i) => (
+          <RouteCard key={r.id} route={r} isOptimal={i===0}
+            isSelected={selected?.id===r.id} onSelect={setSelected} />
+        ))}
+        {selected && (
+          <div style={{ marginTop:"4px", paddingBottom:"8px" }}>
+            <button onClick={confirm} style={{
+              width:"100%", padding:"14px",
+              background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+              border:"none", borderRadius:"13px", color:"#fff",
+              fontSize:"14px", fontWeight:"700", cursor:"pointer",
+              boxShadow:"0 4px 24px #1d4ed840"
+            }}>✓ Go with {selected.label}</button>
+            <p style={{ textAlign:"center", fontSize:"11px", color:"#475569", marginTop:"7px" }}>
+              Your choice updates your Bayesian preference weights
+            </p>
           </div>
+        )}
+      </>
+    );
+
+    // Map overlays — bottom position shifts up on mobile to stay above the sheet.
+    const overlayBottom = isMobile ? "170px" : "12px";
+    const mapOverlays = (
+      <>
+        <div style={{ position:"absolute", top:"12px", left:"12px",
+          background:"#050d1aee", backdropFilter:"blur(8px)",
+          borderRadius:"10px", padding:"8px 12px", border:"1px solid #1e3348",
+          pointerEvents:"none" }}>
+          <div style={{ fontSize:"10px", color:"#64748b" }}>FROM</div>
+          <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{origin}</div>
+          <div style={{ fontSize:"10px", color:"#64748b", marginTop:"3px" }}>TO</div>
+          <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{dest}</div>
         </div>
-        <button onClick={()=>setScreen("main")} style={{ background:"#0d1b2a",
-          border:"1px solid #1e3348", color:"#94a3b8",
-          borderRadius:"8px", padding:"7px 12px", cursor:"pointer", fontSize:"12px" }}>← Back</button>
-      </div>
-
-      {/* Side-by-side body */}
-      <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
-
-        {/* LEFT — scrollable routes panel */}
-        <div style={{ width:"320px", flexShrink:0, overflowY:"auto",
-          borderRight:"1px solid #1e3348", padding:"14px",
-          display:"flex", flexDirection:"column", gap:"10px" }}>
-
-          {routes.map((r,i)=>(
-            <RouteCard key={r.id} route={r} isOptimal={i===0}
-              isSelected={selected?.id===r.id} onSelect={setSelected} />
-          ))}
-
-          {selected && (
-            <div style={{ marginTop:"4px", paddingBottom:"8px" }}>
-              <button onClick={confirm} style={{
-                width:"100%", padding:"14px",
-                background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
-                border:"none", borderRadius:"13px", color:"#fff",
-                fontSize:"14px", fontWeight:"700", cursor:"pointer",
-                boxShadow:"0 4px 24px #1d4ed840"
-              }}>✓ Go with {selected.label}</button>
-              <p style={{ textAlign:"center", fontSize:"11px", color:"#475569", marginTop:"7px" }}>
-                Your choice updates your Bayesian preference weights
-              </p>
-            </div>
-          )}
-        </div>
-
-        {/* RIGHT — full-height map */}
-        <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
-          <RouteMap route={selected} userLocation={userLocation} />
-
-          {/* Origin/dest overlay */}
-          <div style={{ position:"absolute", top:"12px", left:"12px",
-            background:"#050d1aee", backdropFilter:"blur(8px)",
-            borderRadius:"10px", padding:"8px 12px", border:"1px solid #1e3348",
+        {originCoords && (
+          <div style={{ position:"absolute", bottom:overlayBottom, right:"12px",
+            background:"#050d1aee", backdropFilter:"blur(6px)",
+            borderRadius:"8px", padding:"5px 9px", border:"1px solid #1e3348",
             pointerEvents:"none" }}>
-            <div style={{ fontSize:"10px", color:"#64748b" }}>FROM</div>
-            <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{origin}</div>
-            <div style={{ fontSize:"10px", color:"#64748b", marginTop:"3px" }}>TO</div>
-            <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{dest}</div>
+            <span style={{ fontSize:"10px", color:"#475569", fontFamily:"monospace" }}>
+              {originCoords.lat.toFixed(4)}, {originCoords.lng.toFixed(4)}
+            </span>
           </div>
+        )}
+        {selected && (
+          <div style={{ position:"absolute", bottom:overlayBottom, left:"12px",
+            background:"#050d1aee", backdropFilter:"blur(6px)",
+            borderRadius:"8px", padding:"6px 10px", border:"1px solid #1e3348",
+            pointerEvents:"none", display:"flex", alignItems:"center", gap:"6px" }}>
+            <span style={{ fontSize:"13px" }}>{selected.steps[0]?.icon}</span>
+            <span style={{ fontSize:"11px", fontWeight:"600", color:"#e2e8f0" }}>{selected.label}</span>
+            <span style={{ fontSize:"11px", color:"#475569" }}>· {selected.duration} min</span>
+          </div>
+        )}
+      </>
+    );
 
-          {/* Coords overlay */}
-          {originCoords && (
-            <div style={{ position:"absolute", bottom:"12px", right:"12px",
-              background:"#050d1aee", backdropFilter:"blur(6px)",
-              borderRadius:"8px", padding:"5px 9px", border:"1px solid #1e3348",
-              pointerEvents:"none" }}>
-              <span style={{ fontSize:"10px", color:"#475569", fontFamily:"monospace" }}>
-                {originCoords.lat.toFixed(4)}, {originCoords.lng.toFixed(4)}
-              </span>
-            </div>
-          )}
+    return (
+      <div style={{ height:"100vh", width:"100vw", display:"flex", flexDirection:"column",
+        background:"#050d1a", fontFamily:"'DM Sans',sans-serif",
+        backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
+        {notif && <Notif {...notif} />}
 
-          {/* Selected route mode badge */}
-          {selected && (
-            <div style={{ position:"absolute", bottom:"12px", left:"12px",
-              background:"#050d1aee", backdropFilter:"blur(6px)",
-              borderRadius:"8px", padding:"6px 10px", border:"1px solid #1e3348",
-              pointerEvents:"none", display:"flex", alignItems:"center", gap:"6px" }}>
-              <span style={{ fontSize:"13px" }}>{selected.steps[0]?.icon}</span>
-              <span style={{ fontSize:"11px", fontWeight:"600", color:"#e2e8f0" }}>{selected.label}</span>
-              <span style={{ fontSize:"11px", color:"#475569" }}>· {selected.duration} min</span>
+        {/* Top bar */}
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+          padding:"12px 18px", borderBottom:"1px solid #1e3348",
+          background:"#0a1628", flexShrink:0 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:"14px" }}>
+            <span style={{ fontSize:"20px" }}>🚇</span>
+            <div>
+              <div style={{ fontSize:"12px", fontWeight:"700", color:"#e2e8f0",
+                maxWidth: isMobile ? "200px" : "none",
+                overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                {origin} <span style={{ color:"#334155" }}>→</span> {dest}
+              </div>
+              <div style={{ fontSize:"11px", color:"#475569" }}>
+                {routes.length} routes · Live data · Google Maps
+              </div>
             </div>
-          )}
+          </div>
+          <button onClick={()=>setScreen("main")} style={{ background:"#0d1b2a",
+            border:"1px solid #1e3348", color:"#94a3b8",
+            borderRadius:"8px", padding:"7px 12px", cursor:"pointer", fontSize:"12px" }}>← Back</button>
         </div>
+
+        {isMobile ? (
+          /* ── MOBILE: full-bleed map + bottom sheet ── */
+          <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
+            <RouteMap route={selected} userLocation={userLocation} bottomPadding={180} />
+            {mapOverlays}
+
+            {/* Bottom sheet */}
+            <div style={{
+              position:"absolute", bottom:0, left:0, right:0,
+              height: sheetOpen ? SHEET_FULL : SHEET_PEEK,
+              transition:"height 0.3s cubic-bezier(0.4,0,0.2,1)",
+              background:"#0d1b2a",
+              borderTop:"1px solid #1e3348",
+              borderRadius:"16px 16px 0 0",
+              boxShadow:"0 -8px 30px #00000060",
+              display:"flex", flexDirection:"column",
+              overflow:"hidden",
+            }}>
+              {/* Drag handle — tapping toggles sheet */}
+              <div onClick={() => setSheetOpen(v => !v)}
+                style={{ flexShrink:0, padding:"10px 0 4px", cursor:"pointer",
+                  display:"flex", flexDirection:"column", alignItems:"center", gap:"8px" }}>
+                <div style={{ width:"36px", height:"4px", borderRadius:"2px", background:"#334155" }} />
+                {/* Peek row: selected route summary when collapsed */}
+                {!sheetOpen && selected && (
+                  <div style={{ width:"100%", padding:"0 14px 6px",
+                    display:"flex", alignItems:"center", gap:"10px" }}>
+                    <span style={{ fontSize:"22px" }}>{selected.steps[0]?.icon}</span>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:"13px", fontWeight:"700", color:"#e2e8f0",
+                        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        {selected.label}
+                      </div>
+                      <div style={{ fontSize:"11px", color:"#64748b" }}>
+                        {selected.duration} min · {routes.length} routes — tap to expand
+                      </div>
+                    </div>
+                    <span style={{ color:"#475569", fontSize:"20px", lineHeight:1 }}>›</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Scrollable route list — only visible when open */}
+              <div style={{ flex:1, overflowY:"auto", padding:"4px 14px 14px",
+                display:"flex", flexDirection:"column", gap:"10px" }}>
+                {routeList}
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* ── DESKTOP: side-by-side ── */
+          <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
+            <div style={{ width:"320px", flexShrink:0, overflowY:"auto",
+              borderRight:"1px solid #1e3348", padding:"14px",
+              display:"flex", flexDirection:"column", gap:"10px" }}>
+              {routeList}
+            </div>
+            <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
+              <RouteMap route={selected} userLocation={userLocation} bottomPadding={50} />
+              {mapOverlays}
+            </div>
+          </div>
+        )}
+
+        <style>{globalStyles}</style>
       </div>
-      <style>{globalStyles}</style>
-    </div>
-  );
+    );
+  }
 
   // ── MAIN ─────────────────────────────────────────────────────────────────────
   return (
