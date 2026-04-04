@@ -252,9 +252,11 @@ function decodePolyline(encoded) {
 // Draws the exact selected route by decoding overview_polyline from the raw
 // Directions API response and rendering it as google.maps.Polyline overlays.
 
-function RouteMap({ route }) {
-  const containerRef = useRef(null);
-  const mapRef       = useRef(null);
+function RouteMap({ route, userLocation }) {
+  const containerRef    = useRef(null);
+  const mapRef          = useRef(null);
+  const locMarkerRef    = useRef(null);
+  const locCircleRef    = useRef(null);
   const [ready, setReady] = useState(false);
 
   // Initialize the map once.
@@ -335,6 +337,48 @@ function RouteMap({ route }) {
     // Cleanup: remove all overlays when route changes or component unmounts.
     return () => overlays.forEach(o => o.setMap(null));
   }, [ready, route]);
+
+  // Update (or create) the user-location marker + accuracy circle.
+  useEffect(() => {
+    if (!ready || !userLocation || !mapRef.current) return;
+    const pos = { lat: userLocation.lat, lng: userLocation.lng };
+
+    if (locMarkerRef.current) {
+      locMarkerRef.current.setPosition(pos);
+    } else {
+      locMarkerRef.current = new window.google.maps.Marker({
+        position: pos,
+        map: mapRef.current,
+        title: "Your location",
+        zIndex: 999,
+        icon: {
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 9,
+          fillColor: "#3b82f6",
+          fillOpacity: 1,
+          strokeColor: "#ffffff",
+          strokeWeight: 2.5,
+        },
+      });
+    }
+
+    if (locCircleRef.current) {
+      locCircleRef.current.setCenter(pos);
+      locCircleRef.current.setRadius(userLocation.accuracy ?? 40);
+    } else {
+      locCircleRef.current = new window.google.maps.Circle({
+        center: pos,
+        radius: userLocation.accuracy ?? 40,
+        map: mapRef.current,
+        fillColor: "#3b82f6",
+        fillOpacity: 0.12,
+        strokeColor: "#3b82f6",
+        strokeOpacity: 0.35,
+        strokeWeight: 1,
+        zIndex: 998,
+      });
+    }
+  }, [ready, userLocation]);
 
   return (
     <div ref={containerRef}
@@ -630,6 +674,22 @@ export default function App() {
   const [bayesLog,     setBayesLog]     = useState([]);
   const [tripCount,    setTripCount]    = useState(0);
   const [notif,        setNotif]        = useState(null);
+  const [userLocation, setUserLocation] = useState(null);
+
+  // Request geolocation on mount and watch for updates.
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    const id = navigator.geolocation.watchPosition(
+      pos => setUserLocation({
+        lat:      pos.coords.latitude,
+        lng:      pos.coords.longitude,
+        accuracy: pos.coords.accuracy,
+      }),
+      err => console.warn("Geolocation:", err.message),
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 10000 },
+    );
+    return () => navigator.geolocation.clearWatch(id);
+  }, []);
 
   const weights = buildWeights(prefs);
   const setPref = key => val => setPrefs(p => ({ ...p, [key]: val }));
@@ -880,7 +940,7 @@ export default function App() {
 
         {/* RIGHT — full-height map */}
         <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
-          <RouteMap route={selected} />
+          <RouteMap route={selected} userLocation={userLocation} />
 
           {/* Origin/dest overlay */}
           <div style={{ position:"absolute", top:"12px", left:"12px",
