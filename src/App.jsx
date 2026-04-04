@@ -204,7 +204,7 @@ function loadMapsJs(key) {
     if (window.google?.maps?.Map) { resolve(); return; }
     window.__gmapsReady = resolve;
     const s = document.createElement("script");
-    s.src = `https://maps.googleapis.com/maps/api/js?key=${key}&callback=__gmapsReady&loading=async`;
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places&callback=__gmapsReady&loading=async`;
     document.head.appendChild(s);
   });
   return _mapsApiPromise;
@@ -487,20 +487,103 @@ function NavBtn({ onClick, children, title }) {
 }
 
 function LocInput({ label, dot, value, onChange, placeholder }) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [open, setOpen]               = useState(false);
+  const [activeIdx, setActiveIdx]     = useState(-1);
+  const svcRef     = useRef(null);
+  const debounceRef = useRef(null);
+
+  const VANCOUVER_CENTER = { lat: 49.2827, lng: -123.1207 };
+
+  function getSvc() {
+    if (!svcRef.current && window.google?.maps?.places)
+      svcRef.current = new window.google.maps.places.AutocompleteService();
+    return svcRef.current;
+  }
+
+  function fetchSuggestions(input) {
+    clearTimeout(debounceRef.current);
+    if (!input || input.length < 2) { setSuggestions([]); return; }
+    debounceRef.current = setTimeout(() => {
+      const svc = getSvc();
+      if (!svc) return;
+      svc.getPlacePredictions(
+        {
+          input,
+          componentRestrictions: { country: "ca" },
+          locationBias: { center: VANCOUVER_CENTER, radius: 60000 },
+        },
+        (predictions, status) => {
+          const ok = window.google.maps.places.PlacesServiceStatus.OK;
+          setSuggestions(status === ok && predictions ? predictions.slice(0, 5) : []);
+          setActiveIdx(-1);
+        }
+      );
+    }, 200);
+  }
+
+  function pick(description) {
+    onChange(description);
+    setSuggestions([]);
+    setOpen(false);
+  }
+
+  function handleKey(e) {
+    if (!suggestions.length) return;
+    if (e.key === "ArrowDown")  { e.preventDefault(); setActiveIdx(i => Math.min(i + 1, suggestions.length - 1)); }
+    if (e.key === "ArrowUp")    { e.preventDefault(); setActiveIdx(i => Math.max(i - 1, 0)); }
+    if (e.key === "Enter" && activeIdx >= 0) { e.preventDefault(); pick(suggestions[activeIdx].description); }
+    if (e.key === "Escape")     { setSuggestions([]); setOpen(false); }
+  }
+
+  const showDrop = open && suggestions.length > 0;
+
   return (
-    <div style={{ marginBottom:"4px" }}>
+    <div style={{ marginBottom:"4px", position:"relative" }}>
       <label style={{ fontSize:"10px", color:"#475569", display:"block",
         marginBottom:"5px", fontFamily:"monospace" }}>{label}</label>
       <div style={{ position:"relative" }}>
         <div style={{ position:"absolute", left:"12px", top:"50%", transform:"translateY(-50%)",
           width:"7px", height:"7px", borderRadius:"50%",
-          background:dot, boxShadow:`0 0 7px ${dot}` }} />
-        <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+          background:dot, boxShadow:`0 0 7px ${dot}`, zIndex:1 }} />
+        <input
+          value={value}
+          placeholder={placeholder}
+          onChange={e => { onChange(e.target.value); fetchSuggestions(e.target.value); }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          onKeyDown={handleKey}
           style={{ width:"100%", padding:"11px 11px 11px 30px", background:"#0a1628",
             border:"1px solid #1e3348", borderRadius:"9px", color:"#e2e8f0",
             fontSize:"13px", outline:"none", boxSizing:"border-box",
-            fontFamily:"'DM Sans',sans-serif" }} />
+            fontFamily:"'DM Sans',sans-serif" }}
+        />
       </div>
+
+      {showDrop && (
+        <div style={{ position:"absolute", top:"100%", left:0, right:0, marginTop:"4px",
+          background:"#0d1b2a", border:"1px solid #1e3348", borderRadius:"10px",
+          overflow:"hidden", zIndex:200, boxShadow:"0 8px 30px #00000070" }}>
+          {suggestions.map((s, i) => (
+            <div
+              key={s.place_id}
+              onMouseDown={() => pick(s.description)}
+              style={{
+                padding:"9px 12px", cursor:"pointer",
+                background: i === activeIdx ? "#1e3348" : "transparent",
+                borderBottom: i < suggestions.length - 1 ? "1px solid #1e334840" : "none",
+              }}
+            >
+              <div style={{ fontSize:"13px", color:"#e2e8f0", fontWeight:"600" }}>
+                {s.structured_formatting.main_text}
+              </div>
+              <div style={{ fontSize:"11px", color:"#475569", marginTop:"1px" }}>
+                {s.structured_formatting.secondary_text}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
