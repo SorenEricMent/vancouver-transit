@@ -1,7 +1,12 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 
 // ─── API KEYS (from .env) ─────────────────────────────────────────────────────
 const GOOGLE_KEY     = import.meta.env.VITE_GOOGLE_KEY;
+
+// Pre-load the Maps JS SDK immediately so Places autocomplete is ready by the
+// time the user starts typing — not deferred until the map renders.
+// eslint-disable-next-line no-use-before-define
+setTimeout(() => loadMapsJs(GOOGLE_KEY), 0);
 
 // Fixed transit fare (TransLink Zone 1)
 const TRANSIT_FARE = 3.15;
@@ -113,6 +118,7 @@ function parseGoogleRoute(googleRoute, routeType, idPrefix) {
     source:       "google",
     departureTime: leg.departure_time?.text || null,
     arrivalTime:   leg.arrival_time?.text   || null,
+    rawRoute:     googleRoute,
   };
 }
 
@@ -194,35 +200,189 @@ const DEFAULT_PREFS = {
   timeWeight: 60, walkWeight: 40, costWeight: 50, ecoWeight: 20,
 };
 
-// ─── GOOGLE MAPS EMBED ────────────────────────────────────────────────────────
-// Uses the Google Maps Embed API to show a real interactive route map.
+// ─── GOOGLE MAPS JS API LOADER ────────────────────────────────────────────────
 
-// Embed API only supports one travel mode per request.
+let _mapsApiPromise = null;
+function loadMapsJs(key) {
+  if (_mapsApiPromise) return _mapsApiPromise;
+  _mapsApiPromise = new Promise(resolve => {
+    if (window.google?.maps?.Map) { resolve(); return; }
+    window.__gmapsReady = resolve;
+    const s = document.createElement("script");
+    s.src = `https://maps.googleapis.com/maps/api/js?key=${key}&libraries=places&callback=__gmapsReady&loading=async`;
+    document.head.appendChild(s);
+  });
+  return _mapsApiPromise;
+}
 
-function RouteMap({ route, origin, destination }) {
-  const embedMode = (route?.type === "driving" || route?.type === "drive+transit")
-    ? "driving" : "transit";
+const DARK_MAP_STYLES = [
+  { elementType: "geometry",              stylers: [{ color: "#0d1b2a" }] },
+  { elementType: "labels.text.fill",      stylers: [{ color: "#64748b" }] },
+  { elementType: "labels.text.stroke",    stylers: [{ color: "#0a1628" }] },
+  { featureType: "road",                  elementType: "geometry",     stylers: [{ color: "#1e3348" }] },
+  { featureType: "road.highway",          elementType: "geometry",     stylers: [{ color: "#253f5a" }] },
+  { featureType: "road",                  elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
+  { featureType: "water",                 elementType: "geometry",     stylers: [{ color: "#050d1a" }] },
+  { featureType: "transit",              elementType: "geometry",     stylers: [{ color: "#1e3348" }] },
+  { featureType: "poi",                   stylers: [{ visibility: "off" }] },
+  { featureType: "administrative",        elementType: "geometry",     stylers: [{ color: "#1e3348" }] },
+  { featureType: "administrative.locality", elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
+  { featureType: "landscape",             elementType: "geometry",     stylers: [{ color: "#0d1b2a" }] },
+];
 
-  const embedDest = destination;
+// ─── POLYLINE DECODER ─────────────────────────────────────────────────────────
+// Decodes a Google Maps encoded polyline string into [{lat, lng}] points.
 
-  const src = `https://www.google.com/maps/embed/v1/directions`
-    + `?key=${GOOGLE_KEY}`
-    + `&origin=${encodeURIComponent(origin)}`
-    + `&destination=${encodeURIComponent(embedDest)}`
-    + `&mode=${embedMode}`
-    + `&region=ca`;
+function decodePolyline(encoded) {
+  const points = [];
+  let index = 0, lat = 0, lng = 0;
+  while (index < encoded.length) {
+    let b, shift = 0, result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lat += (result & 1) ? ~(result >> 1) : (result >> 1);
+    shift = 0; result = 0;
+    do { b = encoded.charCodeAt(index++) - 63; result |= (b & 0x1f) << shift; shift += 5; } while (b >= 0x20);
+    lng += (result & 1) ? ~(result >> 1) : (result >> 1);
+    points.push({ lat: lat / 1e5, lng: lng / 1e5 });
+  }
+  return points;
+}
+
+// ─── GOOGLE MAPS ROUTE MAP ────────────────────────────────────────────────────
+// Draws the exact selected route by decoding overview_polyline from the raw
+// Directions API response and rendering it as google.maps.Polyline overlays.
+
+function RouteMap({ route, userLocation, bottomPadding = 50 }) {
+  const containerRef    = useRef(null);
+  const mapRef          = useRef(null);
+  const locMarkerRef    = useRef(null);
+  const locCircleRef    = useRef(null);
+  const [ready, setReady] = useState(false);
+
+  // Initialize the map once.
+  useEffect(() => {
+    let cancelled = false;
+    loadMapsJs(GOOGLE_KEY).then(() => {
+      if (cancelled || !containerRef.current || mapRef.current) return;
+      mapRef.current = new window.google.maps.Map(containerRef.current, {
+        zoom: 12,
+        center: { lat: 49.2827, lng: -123.1207 },
+        styles: DARK_MAP_STYLES,
+        zoomControl: true,
+        streetViewControl: false,
+        mapTypeControl: false,
+        fullscreenControl: false,
+      });
+      setReady(true);
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  // Draw the route whenever the selection changes.
+  useEffect(() => {
+    if (!ready || !route?.rawRoute || !mapRef.current) return;
+    const map = mapRef.current;
+    const leg = route.rawRoute.legs[0];
+    const overlays = [];
+
+    // ── Polylines ──────────────────────────────────────────────────────────
+    if (route.type === "transit") {
+      // Draw each step individually so walking legs look different from transit legs.
+      leg.steps.forEach(step => {
+        const pts = step.polyline?.points ? decodePolyline(step.polyline.points) : [];
+        if (!pts.length) return;
+        const isWalk = step.travel_mode === "WALKING";
+        overlays.push(new window.google.maps.Polyline({
+          path: pts,
+          strokeColor:   isWalk ? "#64748b" : "#3b82f6",
+          strokeWeight:  isWalk ? 3 : 5,
+          strokeOpacity: isWalk ? 0.55 : 0.9,
+          map,
+        }));
+      });
+    } else {
+      const pts = route.rawRoute.overview_polyline?.points
+        ? decodePolyline(route.rawRoute.overview_polyline.points) : [];
+      if (pts.length) {
+        overlays.push(new window.google.maps.Polyline({
+          path: pts, strokeColor: "#f59e0b",
+          strokeWeight: 5, strokeOpacity: 0.9, map,
+        }));
+      }
+    }
+
+    // ── Origin / destination markers ──────────────────────────────────────
+    [
+      { pos: leg.start_location, color: "#22c55e" },
+      { pos: leg.end_location,   color: "#ef4444" },
+    ].forEach(({ pos, color }) => {
+      overlays.push(new window.google.maps.Marker({
+        position: pos, map,
+        icon: {
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 8, fillColor: color, fillOpacity: 1,
+          strokeColor: "#fff", strokeWeight: 2,
+        },
+      }));
+    });
+
+    // ── Fit bounds to the route ───────────────────────────────────────────
+    const bounds = new window.google.maps.LatLngBounds();
+    const overviewPts = route.rawRoute.overview_polyline?.points
+      ? decodePolyline(route.rawRoute.overview_polyline.points) : [];
+    (overviewPts.length ? overviewPts : [leg.start_location, leg.end_location])
+      .forEach(p => bounds.extend(p));
+    map.fitBounds(bounds, { top: 50, right: 50, bottom: bottomPadding, left: 50 });
+
+    // Cleanup: remove all overlays when route changes or component unmounts.
+    return () => overlays.forEach(o => o.setMap(null));
+  }, [ready, route]);
+
+  // Update (or create) the user-location marker + accuracy circle.
+  useEffect(() => {
+    if (!ready || !userLocation || !mapRef.current) return;
+    const pos = { lat: userLocation.lat, lng: userLocation.lng };
+
+    if (locMarkerRef.current) {
+      locMarkerRef.current.setPosition(pos);
+    } else {
+      locMarkerRef.current = new window.google.maps.Marker({
+        position: pos,
+        map: mapRef.current,
+        title: "Your location",
+        zIndex: 999,
+        icon: {
+          path: window.google.maps.SymbolPath.CIRCLE,
+          scale: 9,
+          fillColor: "#3b82f6",
+          fillOpacity: 1,
+          strokeColor: "#ffffff",
+          strokeWeight: 2.5,
+        },
+      });
+    }
+
+    if (locCircleRef.current) {
+      locCircleRef.current.setCenter(pos);
+      locCircleRef.current.setRadius(userLocation.accuracy ?? 40);
+    } else {
+      locCircleRef.current = new window.google.maps.Circle({
+        center: pos,
+        radius: userLocation.accuracy ?? 40,
+        map: mapRef.current,
+        fillColor: "#3b82f6",
+        fillOpacity: 0.12,
+        strokeColor: "#3b82f6",
+        strokeOpacity: 0.35,
+        strokeWeight: 1,
+        zIndex: 998,
+      });
+    }
+  }, [ready, userLocation]);
 
   return (
-    <iframe
-      key={src}
-      src={src}
-      width="100%"
-      height="100%"
-      style={{ border:"none", display:"block", width:"100%", height:"100%" }}
-      allowFullScreen
-      loading="lazy"
-      referrerPolicy="no-referrer-when-downgrade"
-    />
+    <div ref={containerRef}
+      style={{ width: "100%", height: "100%", background: "#0d1b2a" }} />
   );
 }
 
@@ -376,20 +536,103 @@ function NavBtn({ onClick, children, title }) {
 }
 
 function LocInput({ label, dot, value, onChange, placeholder }) {
+  const [suggestions, setSuggestions] = useState([]);
+  const [open, setOpen]               = useState(false);
+  const [activeIdx, setActiveIdx]     = useState(-1);
+  const svcRef     = useRef(null);
+  const debounceRef = useRef(null);
+
+  const VANCOUVER_CENTER = { lat: 49.2827, lng: -123.1207 };
+
+  function getSvc() {
+    if (!svcRef.current && window.google?.maps?.places)
+      svcRef.current = new window.google.maps.places.AutocompleteService();
+    return svcRef.current;
+  }
+
+  function fetchSuggestions(input) {
+    clearTimeout(debounceRef.current);
+    if (!input || input.length < 2) { setSuggestions([]); return; }
+    debounceRef.current = setTimeout(() => {
+      const svc = getSvc();
+      if (!svc) return;
+      svc.getPlacePredictions(
+        {
+          input,
+          componentRestrictions: { country: "ca" },
+          locationBias: { center: VANCOUVER_CENTER, radius: 60000 },
+        },
+        (predictions, status) => {
+          const ok = window.google.maps.places.PlacesServiceStatus.OK;
+          setSuggestions(status === ok && predictions ? predictions.slice(0, 5) : []);
+          setActiveIdx(-1);
+        }
+      );
+    }, 200);
+  }
+
+  function pick(description) {
+    onChange(description);
+    setSuggestions([]);
+    setOpen(false);
+  }
+
+  function handleKey(e) {
+    if (!suggestions.length) return;
+    if (e.key === "ArrowDown")  { e.preventDefault(); setActiveIdx(i => Math.min(i + 1, suggestions.length - 1)); }
+    if (e.key === "ArrowUp")    { e.preventDefault(); setActiveIdx(i => Math.max(i - 1, 0)); }
+    if (e.key === "Enter" && activeIdx >= 0) { e.preventDefault(); pick(suggestions[activeIdx].description); }
+    if (e.key === "Escape")     { setSuggestions([]); setOpen(false); }
+  }
+
+  const showDrop = open && suggestions.length > 0;
+
   return (
-    <div style={{ marginBottom:"4px" }}>
+    <div style={{ marginBottom:"4px", position:"relative" }}>
       <label style={{ fontSize:"10px", color:"#475569", display:"block",
         marginBottom:"5px", fontFamily:"monospace" }}>{label}</label>
       <div style={{ position:"relative" }}>
         <div style={{ position:"absolute", left:"12px", top:"50%", transform:"translateY(-50%)",
           width:"7px", height:"7px", borderRadius:"50%",
-          background:dot, boxShadow:`0 0 7px ${dot}` }} />
-        <input value={value} onChange={e=>onChange(e.target.value)} placeholder={placeholder}
+          background:dot, boxShadow:`0 0 7px ${dot}`, zIndex:1 }} />
+        <input
+          value={value}
+          placeholder={placeholder}
+          onChange={e => { onChange(e.target.value); fetchSuggestions(e.target.value); }}
+          onFocus={() => setOpen(true)}
+          onBlur={() => setTimeout(() => setOpen(false), 150)}
+          onKeyDown={handleKey}
           style={{ width:"100%", padding:"11px 11px 11px 30px", background:"#0a1628",
             border:"1px solid #1e3348", borderRadius:"9px", color:"#e2e8f0",
             fontSize:"13px", outline:"none", boxSizing:"border-box",
-            fontFamily:"'DM Sans',sans-serif" }} />
+            fontFamily:"'DM Sans',sans-serif" }}
+        />
       </div>
+
+      {showDrop && (
+        <div style={{ position:"absolute", top:"100%", left:0, right:0, marginTop:"4px",
+          background:"#0d1b2a", border:"1px solid #1e3348", borderRadius:"10px",
+          overflow:"hidden", zIndex:200, boxShadow:"0 8px 30px #00000070" }}>
+          {suggestions.map((s, i) => (
+            <div
+              key={s.place_id}
+              onMouseDown={() => pick(s.description)}
+              style={{
+                padding:"9px 12px", cursor:"pointer",
+                background: i === activeIdx ? "#1e3348" : "transparent",
+                borderBottom: i < suggestions.length - 1 ? "1px solid #1e334840" : "none",
+              }}
+            >
+              <div style={{ fontSize:"13px", color:"#e2e8f0", fontWeight:"600" }}>
+                {s.structured_formatting.main_text}
+              </div>
+              <div style={{ fontSize:"11px", color:"#475569", marginTop:"1px" }}>
+                {s.structured_formatting.secondary_text}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -414,11 +657,42 @@ const globalStyles = `
   ::-webkit-scrollbar-thumb { background: #1e3348; border-radius: 2px; }
 `;
 
+// ─── LOCAL STORAGE HOOK ──────────────────────────────────────────────────────
+
+function useLocalStorage(key, defaultValue) {
+  const [value, setValue] = useState(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      return stored !== null ? JSON.parse(stored) : defaultValue;
+    } catch {
+      return defaultValue;
+    }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota exceeded */ }
+  }, [key, value]);
+
+  return [value, setValue];
+}
+
+// ─── MOBILE HOOK ─────────────────────────────────────────────────────────────
+
+function useIsMobile() {
+  const [mobile, setMobile] = useState(() => window.innerWidth < 640);
+  useEffect(() => {
+    const fn = () => setMobile(window.innerWidth < 640);
+    window.addEventListener("resize", fn);
+    return () => window.removeEventListener("resize", fn);
+  }, []);
+  return mobile;
+}
+
 // ─── MAIN APP ─────────────────────────────────────────────────────────────────
 
 export default function App() {
   const [screen,       setScreen]       = useState("setup");
-  const [prefs,        setPrefs]        = useState(DEFAULT_PREFS);
+  const [prefs,        setPrefs]        = useLocalStorage("vt_prefs",    DEFAULT_PREFS);
   const [origin,       setOrigin]       = useState("");
   const [dest,         setDest]         = useState("");
   const [loading,      setLoading]      = useState(false);
@@ -427,10 +701,28 @@ export default function App() {
   const [routes,       setRoutes]       = useState([]);
   const [selected,     setSelected]     = useState(null);
   const [originCoords, setOriginCoords] = useState(null);
-  const [history,      setHistory]      = useState([]);
-  const [bayesLog,     setBayesLog]     = useState([]);
-  const [tripCount,    setTripCount]    = useState(0);
+  const [history,      setHistory]      = useLocalStorage("vt_history",   []);
+  const [bayesLog,     setBayesLog]     = useLocalStorage("vt_bayeslog",  []);
+  const [tripCount,    setTripCount]    = useLocalStorage("vt_tripcount", 0);
   const [notif,        setNotif]        = useState(null);
+  const [userLocation, setUserLocation] = useState(null);
+  const [sheetOpen,    setSheetOpen]    = useState(false);
+  const isMobile = useIsMobile();
+
+  // Request geolocation on mount and watch for updates.
+  useEffect(() => {
+    if (!navigator.geolocation) return;
+    const id = navigator.geolocation.watchPosition(
+      pos => setUserLocation({
+        lat:      pos.coords.latitude,
+        lng:      pos.coords.longitude,
+        accuracy: pos.coords.accuracy,
+      }),
+      err => console.warn("Geolocation:", err.message),
+      { enableHighAccuracy: true, maximumAge: 15000, timeout: 10000 },
+    );
+    return () => navigator.geolocation.clearWatch(id);
+  }, []);
 
   const weights = buildWeights(prefs);
   const setPref = key => val => setPrefs(p => ({ ...p, [key]: val }));
@@ -451,6 +743,7 @@ export default function App() {
       setRoutes(ranked);
       setSelected(ranked[0]);
       setOriginCoords(oc);
+      setSheetOpen(false);
       setScreen("results");
     } catch (e) {
       setError(e.message);
@@ -624,104 +917,166 @@ export default function App() {
   );
 
   // ── RESULTS ──────────────────────────────────────────────────────────────────
-  if (screen === "results") return (
-    <div style={{ height:"100vh", width:"100vw", display:"flex", flexDirection:"column",
-      background:"#050d1a", fontFamily:"'DM Sans',sans-serif",
-      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
-      {notif && <Notif {...notif} />}
+  if (screen === "results") {
+    const SHEET_PEEK = "158px";
+    const SHEET_FULL = "70vh";
 
-      {/* Top bar */}
-      <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
-        padding:"12px 18px", borderBottom:"1px solid #1e3348",
-        background:"#0a1628", flexShrink:0 }}>
-        <div style={{ display:"flex", alignItems:"center", gap:"14px" }}>
-          <span style={{ fontSize:"20px" }}>🚇</span>
-          <div>
-            <div style={{ fontSize:"12px", fontWeight:"700", color:"#e2e8f0" }}>
-              {origin} <span style={{ color:"#334155" }}>→</span> {dest}
-            </div>
-            <div style={{ fontSize:"11px", color:"#475569" }}>
-              {routes.length} routes · Live data · Google Maps
-            </div>
+    // Shared route list + confirm button used in both layouts.
+    const routeList = (
+      <>
+        {routes.map((r,i) => (
+          <RouteCard key={r.id} route={r} isOptimal={i===0}
+            isSelected={selected?.id===r.id} onSelect={setSelected} />
+        ))}
+        {selected && (
+          <div style={{ marginTop:"4px", paddingBottom:"8px" }}>
+            <button onClick={confirm} style={{
+              width:"100%", padding:"14px",
+              background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+              border:"none", borderRadius:"13px", color:"#fff",
+              fontSize:"14px", fontWeight:"700", cursor:"pointer",
+              boxShadow:"0 4px 24px #1d4ed840"
+            }}>✓ Go with {selected.label}</button>
+            <p style={{ textAlign:"center", fontSize:"11px", color:"#475569", marginTop:"7px" }}>
+              Your choice updates your Bayesian preference weights
+            </p>
           </div>
+        )}
+      </>
+    );
+
+    // Map overlays — bottom position shifts up on mobile to stay above the sheet.
+    const overlayBottom = isMobile ? "170px" : "12px";
+    const mapOverlays = (
+      <>
+        <div style={{ position:"absolute", top:"12px", left:"12px",
+          background:"#050d1aee", backdropFilter:"blur(8px)",
+          borderRadius:"10px", padding:"8px 12px", border:"1px solid #1e3348",
+          pointerEvents:"none" }}>
+          <div style={{ fontSize:"10px", color:"#64748b" }}>FROM</div>
+          <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{origin}</div>
+          <div style={{ fontSize:"10px", color:"#64748b", marginTop:"3px" }}>TO</div>
+          <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{dest}</div>
         </div>
-        <button onClick={()=>setScreen("main")} style={{ background:"#0d1b2a",
-          border:"1px solid #1e3348", color:"#94a3b8",
-          borderRadius:"8px", padding:"7px 12px", cursor:"pointer", fontSize:"12px" }}>← Back</button>
-      </div>
-
-      {/* Side-by-side body */}
-      <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
-
-        {/* LEFT — scrollable routes panel */}
-        <div style={{ width:"320px", flexShrink:0, overflowY:"auto",
-          borderRight:"1px solid #1e3348", padding:"14px",
-          display:"flex", flexDirection:"column", gap:"10px" }}>
-
-          {routes.map((r,i)=>(
-            <RouteCard key={r.id} route={r} isOptimal={i===0}
-              isSelected={selected?.id===r.id} onSelect={setSelected} />
-          ))}
-
-          {selected && (
-            <div style={{ marginTop:"4px", paddingBottom:"8px" }}>
-              <button onClick={confirm} style={{
-                width:"100%", padding:"14px",
-                background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
-                border:"none", borderRadius:"13px", color:"#fff",
-                fontSize:"14px", fontWeight:"700", cursor:"pointer",
-                boxShadow:"0 4px 24px #1d4ed840"
-              }}>✓ Go with {selected.label}</button>
-              <p style={{ textAlign:"center", fontSize:"11px", color:"#475569", marginTop:"7px" }}>
-                Your choice updates your Bayesian preference weights
-              </p>
-            </div>
-          )}
-        </div>
-
-        {/* RIGHT — full-height map */}
-        <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
-          <RouteMap route={selected} origin={origin} destination={dest} />
-
-          {/* Origin/dest overlay */}
-          <div style={{ position:"absolute", top:"12px", left:"12px",
-            background:"#050d1aee", backdropFilter:"blur(8px)",
-            borderRadius:"10px", padding:"8px 12px", border:"1px solid #1e3348",
+        {originCoords && (
+          <div style={{ position:"absolute", bottom:overlayBottom, right:"12px",
+            background:"#050d1aee", backdropFilter:"blur(6px)",
+            borderRadius:"8px", padding:"5px 9px", border:"1px solid #1e3348",
             pointerEvents:"none" }}>
-            <div style={{ fontSize:"10px", color:"#64748b" }}>FROM</div>
-            <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{origin}</div>
-            <div style={{ fontSize:"10px", color:"#64748b", marginTop:"3px" }}>TO</div>
-            <div style={{ fontSize:"12px", fontWeight:"600", color:"#e2e8f0" }}>{dest}</div>
+            <span style={{ fontSize:"10px", color:"#475569", fontFamily:"monospace" }}>
+              {originCoords.lat.toFixed(4)}, {originCoords.lng.toFixed(4)}
+            </span>
           </div>
+        )}
+        {selected && (
+          <div style={{ position:"absolute", bottom:overlayBottom, left:"12px",
+            background:"#050d1aee", backdropFilter:"blur(6px)",
+            borderRadius:"8px", padding:"6px 10px", border:"1px solid #1e3348",
+            pointerEvents:"none", display:"flex", alignItems:"center", gap:"6px" }}>
+            <span style={{ fontSize:"13px" }}>{selected.steps[0]?.icon}</span>
+            <span style={{ fontSize:"11px", fontWeight:"600", color:"#e2e8f0" }}>{selected.label}</span>
+            <span style={{ fontSize:"11px", color:"#475569" }}>· {selected.duration} min</span>
+          </div>
+        )}
+      </>
+    );
 
-          {/* Coords overlay */}
-          {originCoords && (
-            <div style={{ position:"absolute", bottom:"12px", right:"12px",
-              background:"#050d1aee", backdropFilter:"blur(6px)",
-              borderRadius:"8px", padding:"5px 9px", border:"1px solid #1e3348",
-              pointerEvents:"none" }}>
-              <span style={{ fontSize:"10px", color:"#475569", fontFamily:"monospace" }}>
-                {originCoords.lat.toFixed(4)}, {originCoords.lng.toFixed(4)}
-              </span>
-            </div>
-          )}
+    return (
+      <div style={{ height:"100vh", width:"100vw", display:"flex", flexDirection:"column",
+        background:"#050d1a", fontFamily:"'DM Sans',sans-serif",
+        backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
+        {notif && <Notif {...notif} />}
 
-          {/* Selected route mode badge */}
-          {selected && (
-            <div style={{ position:"absolute", bottom:"12px", left:"12px",
-              background:"#050d1aee", backdropFilter:"blur(6px)",
-              borderRadius:"8px", padding:"6px 10px", border:"1px solid #1e3348",
-              pointerEvents:"none", display:"flex", alignItems:"center", gap:"6px" }}>
-              <span style={{ fontSize:"13px" }}>{selected.steps[0]?.icon}</span>
-              <span style={{ fontSize:"11px", fontWeight:"600", color:"#e2e8f0" }}>{selected.label}</span>
-              <span style={{ fontSize:"11px", color:"#475569" }}>· {selected.duration} min</span>
+        {/* Top bar */}
+        <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between",
+          padding:"12px 18px", borderBottom:"1px solid #1e3348",
+          background:"#0a1628", flexShrink:0 }}>
+          <div style={{ display:"flex", alignItems:"center", gap:"14px" }}>
+            <span style={{ fontSize:"20px" }}>🚇</span>
+            <div>
+              <div style={{ fontSize:"12px", fontWeight:"700", color:"#e2e8f0",
+                maxWidth: isMobile ? "200px" : "none",
+                overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                {origin} <span style={{ color:"#334155" }}>→</span> {dest}
+              </div>
+              <div style={{ fontSize:"11px", color:"#475569" }}>
+                {routes.length} routes · Live data · Google Maps
+              </div>
             </div>
-          )}
+          </div>
+          <button onClick={()=>setScreen("main")} style={{ background:"#0d1b2a",
+            border:"1px solid #1e3348", color:"#94a3b8",
+            borderRadius:"8px", padding:"7px 12px", cursor:"pointer", fontSize:"12px" }}>← Back</button>
         </div>
+
+        {isMobile ? (
+          /* ── MOBILE: full-bleed map + bottom sheet ── */
+          <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
+            <RouteMap route={selected} userLocation={userLocation} bottomPadding={180} />
+            {mapOverlays}
+
+            {/* Bottom sheet */}
+            <div style={{
+              position:"absolute", bottom:0, left:0, right:0,
+              height: sheetOpen ? SHEET_FULL : SHEET_PEEK,
+              transition:"height 0.3s cubic-bezier(0.4,0,0.2,1)",
+              background:"#0d1b2a",
+              borderTop:"1px solid #1e3348",
+              borderRadius:"16px 16px 0 0",
+              boxShadow:"0 -8px 30px #00000060",
+              display:"flex", flexDirection:"column",
+              overflow:"hidden",
+            }}>
+              {/* Drag handle — tapping toggles sheet */}
+              <div onClick={() => setSheetOpen(v => !v)}
+                style={{ flexShrink:0, padding:"10px 0 4px", cursor:"pointer",
+                  display:"flex", flexDirection:"column", alignItems:"center", gap:"8px" }}>
+                <div style={{ width:"36px", height:"4px", borderRadius:"2px", background:"#334155" }} />
+                {/* Peek row: selected route summary when collapsed */}
+                {!sheetOpen && selected && (
+                  <div style={{ width:"100%", padding:"0 14px 6px",
+                    display:"flex", alignItems:"center", gap:"10px" }}>
+                    <span style={{ fontSize:"22px" }}>{selected.steps[0]?.icon}</span>
+                    <div style={{ flex:1, minWidth:0 }}>
+                      <div style={{ fontSize:"13px", fontWeight:"700", color:"#e2e8f0",
+                        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                        {selected.label}
+                      </div>
+                      <div style={{ fontSize:"11px", color:"#64748b" }}>
+                        {selected.duration} min · {routes.length} routes — tap to expand
+                      </div>
+                    </div>
+                    <span style={{ color:"#475569", fontSize:"20px", lineHeight:1 }}>›</span>
+                  </div>
+                )}
+              </div>
+
+              {/* Scrollable route list — only visible when open */}
+              <div style={{ flex:1, overflowY:"auto", padding:"4px 14px 14px",
+                display:"flex", flexDirection:"column", gap:"10px" }}>
+                {routeList}
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* ── DESKTOP: side-by-side ── */
+          <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
+            <div style={{ width:"320px", flexShrink:0, overflowY:"auto",
+              borderRight:"1px solid #1e3348", padding:"14px",
+              display:"flex", flexDirection:"column", gap:"10px" }}>
+              {routeList}
+            </div>
+            <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
+              <RouteMap route={selected} userLocation={userLocation} bottomPadding={50} />
+              {mapOverlays}
+            </div>
+          </div>
+        )}
+
+        <style>{globalStyles}</style>
       </div>
-      <style>{globalStyles}</style>
-    </div>
-  );
+    );
+  }
 
   // ── MAIN ─────────────────────────────────────────────────────────────────────
   return (
