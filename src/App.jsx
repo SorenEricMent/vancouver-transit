@@ -657,6 +657,25 @@ const globalStyles = `
   ::-webkit-scrollbar-thumb { background: #1e3348; border-radius: 2px; }
 `;
 
+// ─── LOCAL STORAGE HOOK ──────────────────────────────────────────────────────
+
+function useLocalStorage(key, defaultValue) {
+  const [value, setValue] = useState(() => {
+    try {
+      const stored = localStorage.getItem(key);
+      return stored !== null ? JSON.parse(stored) : defaultValue;
+    } catch {
+      return defaultValue;
+    }
+  });
+
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota exceeded */ }
+  }, [key, value]);
+
+  return [value, setValue];
+}
+
 // ─── MOBILE HOOK ─────────────────────────────────────────────────────────────
 
 function useIsMobile() {
@@ -673,7 +692,7 @@ function useIsMobile() {
 
 export default function App() {
   const [screen,       setScreen]       = useState("setup");
-  const [prefs,        setPrefs]        = useState(DEFAULT_PREFS);
+  const [prefs,        setPrefs]        = useLocalStorage("vt_prefs",    DEFAULT_PREFS);
   const [origin,       setOrigin]       = useState("");
   const [dest,         setDest]         = useState("");
   const [loading,      setLoading]      = useState(false);
@@ -682,9 +701,9 @@ export default function App() {
   const [routes,       setRoutes]       = useState([]);
   const [selected,     setSelected]     = useState(null);
   const [originCoords, setOriginCoords] = useState(null);
-  const [history,      setHistory]      = useState([]);
-  const [bayesLog,     setBayesLog]     = useState([]);
-  const [tripCount,    setTripCount]    = useState(0);
+  const [history,      setHistory]      = useLocalStorage("vt_history",   []);
+  const [bayesLog,     setBayesLog]     = useLocalStorage("vt_bayeslog",  []);
+  const [tripCount,    setTripCount]    = useLocalStorage("vt_tripcount", 0);
   const [notif,        setNotif]        = useState(null);
   const [userLocation, setUserLocation] = useState(null);
   const [sheetOpen,    setSheetOpen]    = useState(false);
