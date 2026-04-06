@@ -386,7 +386,7 @@ function Slider({ label, value, onChange, color, icon, desc }) {
 
 // ─── ROUTE CARD ───────────────────────────────────────────────────────────────
 
-function RouteCard({ route, isOptimal, isSelected, onSelect }) {
+function RouteCard({ route, isOptimal, isSelected, onSelect, onConfirm }) {
   const [open, setOpen] = useState(false);
   const colors = { transit:"#3b82f6", driving:"#f59e0b", "drive+transit":"#10b981" };
   const col = colors[route.type] || "#64748b";
@@ -481,6 +481,18 @@ function RouteCard({ route, isOptimal, isSelected, onSelect }) {
             </div>
           ))}
         </div>
+      )}
+
+      {isSelected && onConfirm && (
+        <button
+          onClick={e => { e.stopPropagation(); onConfirm(); }}
+          style={{ marginTop:"12px", width:"100%", padding:"11px",
+            background:`linear-gradient(135deg,${col},${col}cc)`,
+            border:"none", borderRadius:"10px", color:"#fff",
+            fontSize:"13px", fontWeight:"700", cursor:"pointer",
+            boxShadow:`0 4px 16px ${col}40` }}>
+          ✓ Go with this route
+        </button>
       )}
     </div>
   );
@@ -1092,9 +1104,12 @@ export default function App() {
               borderRadius:"16px 16px 0 0", boxShadow:"0 -8px 30px #00000060",
               display:"flex", flexDirection:"column", overflow:"hidden",
             }}>
-              {!isNavigating && (
+              {isNavigating ? (
+                /* Navigating: just the action bar */
+                actionBar
+              ) : (
                 <>
-                  {/* Pill handle — tap (via onDragEnd) or swipe to expand/collapse */}
+                  {/* Pill handle — tap or swipe to expand/collapse */}
                   <div
                     onTouchStart={onDragStart}
                     onTouchMove={onDragMove}
@@ -1105,30 +1120,38 @@ export default function App() {
                     <div style={{ width:"36px", height:"4px", borderRadius:"2px", background:"#334155" }} />
                   </div>
 
-                  {/* Peek row — outside handle so width is properly constrained by sheet */}
-                  {!sheetOpen && selected && (
-                    <div style={{ flexShrink:0, padding:"0 14px 8px",
-                      display:"flex", alignItems:"center", gap:"10px", overflow:"hidden" }}>
-                      <span style={{ fontSize:"20px", flexShrink:0 }}>{selected.steps[0]?.icon}</span>
-                      <div style={{ flex:1, minWidth:0 }}>
-                        <div style={{ fontSize:"13px", fontWeight:"700", color:"#e2e8f0",
-                          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                          {selected.label}
+                  {!sheetOpen ? (
+                    /* Peek row */
+                    selected && (
+                      <div style={{ flexShrink:0, padding:"0 14px 10px",
+                        display:"flex", alignItems:"center", gap:"10px" }}>
+                        <span style={{ fontSize:"20px", flexShrink:0 }}>{selected.steps[0]?.icon}</span>
+                        <div style={{ flex:1, minWidth:0 }}>
+                          <div style={{ fontSize:"13px", fontWeight:"700", color:"#e2e8f0",
+                            overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                            {selected.label}
+                          </div>
+                          <div style={{ fontSize:"11px", color:"#64748b", marginTop:"1px" }}>
+                            {selected.duration} min · {routes.length} routes — swipe up
+                          </div>
                         </div>
-                        <div style={{ fontSize:"11px", color:"#64748b", marginTop:"1px" }}>
-                          {selected.duration} min · {routes.length} routes — swipe up
-                        </div>
+                        <span style={{ color:"#475569", fontSize:"18px", flexShrink:0 }}>›</span>
                       </div>
-                      <span style={{ color:"#475569", fontSize:"18px", flexShrink:0 }}>›</span>
+                    )
+                  ) : (
+                    /* Expanded: scrollable list; confirm button lives inside the selected card */
+                    <div style={{ flex:1, overflowY:"auto", padding:"4px 12px 16px",
+                      display:"flex", flexDirection:"column", gap:"10px" }}>
+                      {routes.map((r,i) => (
+                        <RouteCard key={r.id} route={r} isOptimal={i===0}
+                          isSelected={selected?.id===r.id}
+                          onSelect={setSelected}
+                          onConfirm={confirm} />
+                      ))}
                     </div>
                   )}
-
-                  {/* Route list — only rendered when expanded */}
-                  {sheetOpen && routeList}
                 </>
               )}
-              {/* Action bar always visible: confirm button or navigating status */}
-              {actionBar}
             </div>
           </div>
         ) : (
