@@ -111,7 +111,7 @@ function parseGoogleRoute(googleRoute, routeType, idPrefix) {
     walkMin,
     cost:         routeType === "transit" ? TRANSIT_FARE
                 : routeType === "driving"  ? Math.round(leg.distance.value / 1000 * DRIVING_COST_PER_KM * 100) / 100
-                : TRANSIT_FARE, // drive+transit: just the fare (driving leg already short)
+                : TRANSIT_FARE,
     transfers,
     steps,
     co2:          Math.round(co2 * 10) / 10,
@@ -154,7 +154,7 @@ async function fetchAllRoutes(originStr, destStr, setLoadingMsg) {
 function computeRouteCost(route, prefs, w) {
   const timeScore     = route.duration / 90;
   const walkScore     = route.walkMin  / 30;
-  const moneyScore    = route.cost / 20; // driving can reach $15-20+ so normalize to 20
+  const moneyScore    = route.cost / 20;
   const transferScore = route.transfers / 4;
   const ecoScore      = route.co2 / 15;
   return w.time * timeScore + w.walk * walkScore + w.money * moneyScore
@@ -216,22 +216,21 @@ function loadMapsJs(key) {
 }
 
 const DARK_MAP_STYLES = [
-  { elementType: "geometry",              stylers: [{ color: "#0d1b2a" }] },
-  { elementType: "labels.text.fill",      stylers: [{ color: "#64748b" }] },
-  { elementType: "labels.text.stroke",    stylers: [{ color: "#0a1628" }] },
-  { featureType: "road",                  elementType: "geometry",     stylers: [{ color: "#1e3348" }] },
-  { featureType: "road.highway",          elementType: "geometry",     stylers: [{ color: "#253f5a" }] },
-  { featureType: "road",                  elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
-  { featureType: "water",                 elementType: "geometry",     stylers: [{ color: "#050d1a" }] },
-  { featureType: "transit",              elementType: "geometry",     stylers: [{ color: "#1e3348" }] },
-  { featureType: "poi",                   stylers: [{ visibility: "off" }] },
-  { featureType: "administrative",        elementType: "geometry",     stylers: [{ color: "#1e3348" }] },
-  { featureType: "administrative.locality", elementType: "labels.text.fill", stylers: [{ color: "#94a3b8" }] },
-  { featureType: "landscape",             elementType: "geometry",     stylers: [{ color: "#0d1b2a" }] },
+  { elementType: "geometry",                stylers: [{ color: "#0d1b2a" }] },
+  { elementType: "labels.text.fill",        stylers: [{ color: "#64748b" }] },
+  { elementType: "labels.text.stroke",      stylers: [{ color: "#0a1628" }] },
+  { featureType: "road",                    elementType: "geometry",          stylers: [{ color: "#1e3348" }] },
+  { featureType: "road.highway",            elementType: "geometry",          stylers: [{ color: "#253f5a" }] },
+  { featureType: "road",                    elementType: "labels.text.fill",  stylers: [{ color: "#94a3b8" }] },
+  { featureType: "water",                   elementType: "geometry",          stylers: [{ color: "#050d1a" }] },
+  { featureType: "transit",                 elementType: "geometry",          stylers: [{ color: "#1e3348" }] },
+  { featureType: "poi",                     stylers: [{ visibility: "off" }] },
+  { featureType: "administrative",          elementType: "geometry",          stylers: [{ color: "#1e3348" }] },
+  { featureType: "administrative.locality", elementType: "labels.text.fill",  stylers: [{ color: "#94a3b8" }] },
+  { featureType: "landscape",               elementType: "geometry",          stylers: [{ color: "#0d1b2a" }] },
 ];
 
 // ─── POLYLINE DECODER ─────────────────────────────────────────────────────────
-// Decodes a Google Maps encoded polyline string into [{lat, lng}] points.
 
 function decodePolyline(encoded) {
   const points = [];
@@ -249,17 +248,14 @@ function decodePolyline(encoded) {
 }
 
 // ─── GOOGLE MAPS ROUTE MAP ────────────────────────────────────────────────────
-// Draws the exact selected route by decoding overview_polyline from the raw
-// Directions API response and rendering it as google.maps.Polyline overlays.
 
 function RouteMap({ route, userLocation, bottomPadding = 50 }) {
-  const containerRef    = useRef(null);
-  const mapRef          = useRef(null);
-  const locMarkerRef    = useRef(null);
-  const locCircleRef    = useRef(null);
+  const containerRef      = useRef(null);
+  const mapRef            = useRef(null);
+  const locMarkerRef      = useRef(null);
+  const locCircleRef      = useRef(null);
   const [ready, setReady] = useState(false);
 
-  // Initialize the map once.
   useEffect(() => {
     let cancelled = false;
     loadMapsJs(GOOGLE_KEY).then(() => {
@@ -278,16 +274,13 @@ function RouteMap({ route, userLocation, bottomPadding = 50 }) {
     return () => { cancelled = true; };
   }, []);
 
-  // Draw the route whenever the selection changes.
   useEffect(() => {
     if (!ready || !route?.rawRoute || !mapRef.current) return;
     const map = mapRef.current;
     const leg = route.rawRoute.legs[0];
     const overlays = [];
 
-    // ── Polylines ──────────────────────────────────────────────────────────
     if (route.type === "transit") {
-      // Draw each step individually so walking legs look different from transit legs.
       leg.steps.forEach(step => {
         const pts = step.polyline?.points ? decodePolyline(step.polyline.points) : [];
         if (!pts.length) return;
@@ -311,7 +304,6 @@ function RouteMap({ route, userLocation, bottomPadding = 50 }) {
       }
     }
 
-    // ── Origin / destination markers ──────────────────────────────────────
     [
       { pos: leg.start_location, color: "#22c55e" },
       { pos: leg.end_location,   color: "#ef4444" },
@@ -326,7 +318,6 @@ function RouteMap({ route, userLocation, bottomPadding = 50 }) {
       }));
     });
 
-    // ── Fit bounds to the route ───────────────────────────────────────────
     const bounds = new window.google.maps.LatLngBounds();
     const overviewPts = route.rawRoute.overview_polyline?.points
       ? decodePolyline(route.rawRoute.overview_polyline.points) : [];
@@ -334,58 +325,40 @@ function RouteMap({ route, userLocation, bottomPadding = 50 }) {
       .forEach(p => bounds.extend(p));
     map.fitBounds(bounds, { top: 50, right: 50, bottom: bottomPadding, left: 50 });
 
-    // Cleanup: remove all overlays when route changes or component unmounts.
     return () => overlays.forEach(o => o.setMap(null));
   }, [ready, route]);
 
-  // Update (or create) the user-location marker + accuracy circle.
   useEffect(() => {
     if (!ready || !userLocation || !mapRef.current) return;
     const pos = { lat: userLocation.lat, lng: userLocation.lng };
-
     if (locMarkerRef.current) {
       locMarkerRef.current.setPosition(pos);
     } else {
       locMarkerRef.current = new window.google.maps.Marker({
-        position: pos,
-        map: mapRef.current,
-        title: "Your location",
-        zIndex: 999,
+        position: pos, map: mapRef.current, title: "Your location", zIndex: 999,
         icon: {
           path: window.google.maps.SymbolPath.CIRCLE,
-          scale: 9,
-          fillColor: "#3b82f6",
-          fillOpacity: 1,
-          strokeColor: "#ffffff",
-          strokeWeight: 2.5,
+          scale: 9, fillColor: "#3b82f6", fillOpacity: 1,
+          strokeColor: "#ffffff", strokeWeight: 2.5,
         },
       });
     }
-
     if (locCircleRef.current) {
       locCircleRef.current.setCenter(pos);
       locCircleRef.current.setRadius(userLocation.accuracy ?? 40);
     } else {
       locCircleRef.current = new window.google.maps.Circle({
-        center: pos,
-        radius: userLocation.accuracy ?? 40,
-        map: mapRef.current,
-        fillColor: "#3b82f6",
-        fillOpacity: 0.12,
-        strokeColor: "#3b82f6",
-        strokeOpacity: 0.35,
-        strokeWeight: 1,
-        zIndex: 998,
+        center: pos, radius: userLocation.accuracy ?? 40, map: mapRef.current,
+        fillColor: "#3b82f6", fillOpacity: 0.12,
+        strokeColor: "#3b82f6", strokeOpacity: 0.35, strokeWeight: 1, zIndex: 998,
       });
     }
   }, [ready, userLocation]);
 
   return (
-    <div ref={containerRef}
-      style={{ width: "100%", height: "100%", background: "#0d1b2a" }} />
+    <div ref={containerRef} style={{ width:"100%", height:"100%", background:"#0d1b2a" }} />
   );
 }
-
 
 // ─── SLIDER ───────────────────────────────────────────────────────────────────
 
@@ -470,7 +443,6 @@ function RouteCard({ route, isOptimal, isSelected, onSelect }) {
         ))}
       </div>
 
-
       <div style={{ marginTop:"10px", display:"flex", alignItems:"center", gap:"8px" }}>
         <span style={{ fontSize:"10px", color:"#475569", fontFamily:"monospace", width:"68px" }}>
           score {(1-route.score).toFixed(3)}
@@ -539,7 +511,7 @@ function LocInput({ label, dot, value, onChange, placeholder }) {
   const [suggestions, setSuggestions] = useState([]);
   const [open, setOpen]               = useState(false);
   const [activeIdx, setActiveIdx]     = useState(-1);
-  const svcRef     = useRef(null);
+  const svcRef      = useRef(null);
   const debounceRef = useRef(null);
 
   const VANCOUVER_CENTER = { lat: 49.2827, lng: -123.1207 };
@@ -557,11 +529,8 @@ function LocInput({ label, dot, value, onChange, placeholder }) {
       const svc = getSvc();
       if (!svc) return;
       svc.getPlacePredictions(
-        {
-          input,
-          componentRestrictions: { country: "ca" },
-          locationBias: { center: VANCOUVER_CENTER, radius: 60000 },
-        },
+        { input, componentRestrictions: { country: "ca" },
+          locationBias: { center: VANCOUVER_CENTER, radius: 60000 } },
         (predictions, status) => {
           const ok = window.google.maps.places.PlacesServiceStatus.OK;
           setSuggestions(status === ok && predictions ? predictions.slice(0, 5) : []);
@@ -596,8 +565,7 @@ function LocInput({ label, dot, value, onChange, placeholder }) {
           width:"7px", height:"7px", borderRadius:"50%",
           background:dot, boxShadow:`0 0 7px ${dot}`, zIndex:1 }} />
         <input
-          value={value}
-          placeholder={placeholder}
+          value={value} placeholder={placeholder}
           onChange={e => { onChange(e.target.value); fetchSuggestions(e.target.value); }}
           onFocus={() => setOpen(true)}
           onBlur={() => setTimeout(() => setOpen(false), 150)}
@@ -608,21 +576,15 @@ function LocInput({ label, dot, value, onChange, placeholder }) {
             fontFamily:"'DM Sans',sans-serif" }}
         />
       </div>
-
       {showDrop && (
         <div style={{ position:"absolute", top:"100%", left:0, right:0, marginTop:"4px",
           background:"#0d1b2a", border:"1px solid #1e3348", borderRadius:"10px",
           overflow:"hidden", zIndex:200, boxShadow:"0 8px 30px #00000070" }}>
           {suggestions.map((s, i) => (
-            <div
-              key={s.place_id}
-              onMouseDown={() => pick(s.description)}
-              style={{
-                padding:"9px 12px", cursor:"pointer",
+            <div key={s.place_id} onMouseDown={() => pick(s.description)}
+              style={{ padding:"9px 12px", cursor:"pointer",
                 background: i === activeIdx ? "#1e3348" : "transparent",
-                borderBottom: i < suggestions.length - 1 ? "1px solid #1e334840" : "none",
-              }}
-            >
+                borderBottom: i < suggestions.length - 1 ? "1px solid #1e334840" : "none" }}>
               <div style={{ fontSize:"13px", color:"#e2e8f0", fontWeight:"600" }}>
                 {s.structured_formatting.main_text}
               </div>
@@ -657,26 +619,22 @@ const globalStyles = `
   ::-webkit-scrollbar-thumb { background: #1e3348; border-radius: 2px; }
 `;
 
-// ─── LOCAL STORAGE HOOK ──────────────────────────────────────────────────────
+// ─── LOCAL STORAGE HOOK ───────────────────────────────────────────────────────
 
 function useLocalStorage(key, defaultValue) {
   const [value, setValue] = useState(() => {
     try {
       const stored = localStorage.getItem(key);
       return stored !== null ? JSON.parse(stored) : defaultValue;
-    } catch {
-      return defaultValue;
-    }
+    } catch { return defaultValue; }
   });
-
   useEffect(() => {
-    try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* quota exceeded */ }
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
   }, [key, value]);
-
   return [value, setValue];
 }
 
-// ─── MOBILE HOOK ─────────────────────────────────────────────────────────────
+// ─── MOBILE HOOK ──────────────────────────────────────────────────────────────
 
 function useIsMobile() {
   const [mobile, setMobile] = useState(() => window.innerWidth < 640);
@@ -708,11 +666,12 @@ export default function App() {
   const [userLocation, setUserLocation] = useState(null);
   const [geoError,     setGeoError]     = useState(null);
   const [sheetOpen,    setSheetOpen]    = useState(false);
+  // "selecting" = choosing a route | "navigating" = confirmed, watching map
+  const [tripState,    setTripState]    = useState("selecting");
   const isMobile  = useIsMobile();
   const sheetRef  = useRef(null);
   const dragRef   = useRef({ active: false, startY: 0, startH: 0 });
 
-  // Request geolocation on mount and watch for updates.
   useEffect(() => {
     if (!navigator.geolocation) return;
     const id = navigator.geolocation.watchPosition(
@@ -738,13 +697,14 @@ export default function App() {
 
   const notify = (msg, color = "#22c55e") => {
     setNotif({ msg, color });
-    setTimeout(() => setNotif(null), 3500);
+    setTimeout(() => setNotif(null), 4000);
   };
 
   // ── SEARCH ──────────────────────────────────────────────────────────────────
   const search = useCallback(async () => {
     if (!origin || !dest) return;
     setLoading(true); setError(null); setRoutes([]); setSelected(null);
+    setTripState("selecting");
     try {
       const { routes: raw, originCoords: oc } =
         await fetchAllRoutes(origin, dest, setLoadingMsg);
@@ -761,7 +721,7 @@ export default function App() {
     }
   }, [origin, dest, prefs, weights]);
 
-  // ── CONFIRM ─────────────────────────────────────────────────────────────────
+  // ── CONFIRM — stays on results screen, switches to navigating state ──────────
   const confirm = useCallback(() => {
     if (!selected) return;
     const updated = bayesianUpdate(prefs, selected, routes);
@@ -781,9 +741,21 @@ export default function App() {
       chosen: selected.label,
     }, ...h]);
     setTripCount(t => t + 1);
-    notify("Route confirmed! Preferences updated 🧠");
-    setScreen("main"); setOrigin(""); setDest("");
+    // Show notification, switch to navigating mode — do NOT leave the results screen
+    notify("Preferences updated 🧠");
+    setTripState("navigating");
+    setSheetOpen(false);
   }, [selected, prefs, routes, origin, dest, tripCount]);
+
+  // ── NEW TRIP — resets back to main search screen ─────────────────────────────
+  const startNewTrip = useCallback(() => {
+    setScreen("main");
+    setOrigin("");
+    setDest("");
+    setRoutes([]);
+    setSelected(null);
+    setTripState("selecting");
+  }, []);
 
   const SUGGESTIONS = [
     ["Burnaby, BC",              "Vancouver General Hospital, Vancouver"],
@@ -812,10 +784,10 @@ export default function App() {
           <p style={{ fontSize:"12px", color:"#475569", margin:"0 0 20px" }}>
             These define your cost function. The app adapts weights via Bayesian updates as you use it.
           </p>
-          <Slider label="Speed Priority"    value={prefs.timeWeight}     onChange={setPref("timeWeight")}      color="#3b82f6" icon="⚡" desc="Prefer faster routes?" />
-          <Slider label="Minimize Walking"  value={prefs.walkWeight}     onChange={setPref("walkWeight")}      color="#f59e0b" icon="🚶" desc="Avoid long walks?" />
-          <Slider label="Cost Sensitivity"  value={prefs.costWeight}     onChange={setPref("costWeight")}      color="#22c55e" icon="💸" desc="Avoid expensive options?" />
-          <Slider label="Eco Preference"    value={prefs.ecoWeight}      onChange={setPref("ecoWeight")}       color="#34d399" icon="🌱" desc="Prefer lower CO₂?" />
+          <Slider label="Speed Priority"   value={prefs.timeWeight}  onChange={setPref("timeWeight")}  color="#3b82f6" icon="⚡" desc="Prefer faster routes?" />
+          <Slider label="Minimize Walking" value={prefs.walkWeight}  onChange={setPref("walkWeight")}  color="#f59e0b" icon="🚶" desc="Avoid long walks?" />
+          <Slider label="Cost Sensitivity" value={prefs.costWeight}  onChange={setPref("costWeight")}  color="#22c55e" icon="💸" desc="Avoid expensive options?" />
+          <Slider label="Eco Preference"   value={prefs.ecoWeight}   onChange={setPref("ecoWeight")}   color="#34d399" icon="🌱" desc="Prefer lower CO₂?" />
           <div style={{ background:"#0a1628", borderRadius:"10px", padding:"10px 12px",
             marginBottom:"18px", border:"1px solid #1e3348" }}>
             <div style={{ fontSize:"10px", color:"#475569", marginBottom:"7px", fontFamily:"monospace" }}>NORMALIZED COST WEIGHTS</div>
@@ -853,7 +825,6 @@ export default function App() {
             padding:"7px 12px", cursor:"pointer", fontSize:"13px" }}>← Back</button>
           <h2 style={{ fontSize:"17px", fontWeight:"700", color:"#e2e8f0", margin:0 }}>Trip History</h2>
         </div>
-
         {bayesLog.length > 0 && (
           <div style={{ background:"#0d1b2a", borderRadius:"16px", border:"1px solid #1e3348",
             padding:"14px", marginBottom:"18px" }}>
@@ -878,7 +849,6 @@ export default function App() {
             ))}
           </div>
         )}
-
         <div style={{ background:"#0d1b2a", borderRadius:"16px", border:"1px solid #1e3348",
           padding:"14px", marginBottom:"18px" }}>
           <div style={{ fontSize:"11px", color:"#475569", marginBottom:"10px", fontFamily:"monospace" }}>
@@ -897,7 +867,6 @@ export default function App() {
             </div>
           ))}
         </div>
-
         {history.length > 0 && (
           <>
             <div style={{ fontSize:"11px", color:"#475569", marginBottom:"9px", fontFamily:"monospace" }}>
@@ -927,6 +896,7 @@ export default function App() {
 
   // ── RESULTS ──────────────────────────────────────────────────────────────────
   if (screen === "results") {
+    const isNavigating  = tripState === "navigating";
     const SHEET_PEEK_PX = 176;
     const SHEET_FULL_PX = Math.round(window.innerHeight * 0.70);
     const SHEET_PEEK    = `${SHEET_PEEK_PX}px`;
@@ -955,34 +925,67 @@ export default function App() {
       const delta = e.changedTouches[0].clientY - dragRef.current.startY;
       if      (delta < -40 && !sheetOpen) setSheetOpen(true);
       else if (delta >  40 &&  sheetOpen) setSheetOpen(false);
-      // else snap back — React re-applies the correct height on next render
     }
 
-    // Shared route list + confirm button used in both layouts.
-    const routeList = (
-      <>
-        {routes.map((r,i) => (
-          <RouteCard key={r.id} route={r} isOptimal={i===0}
-            isSelected={selected?.id===r.id} onSelect={setSelected} />
-        ))}
-        {selected && (
-          <div style={{ marginTop:"4px", paddingBottom:"8px" }}>
-            <button onClick={confirm} style={{
-              width:"100%", padding:"14px",
-              background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
-              border:"none", borderRadius:"13px", color:"#fff",
-              fontSize:"14px", fontWeight:"700", cursor:"pointer",
-              boxShadow:"0 4px 24px #1d4ed840"
-            }}>✓ Go with {selected.label}</button>
-            <p style={{ textAlign:"center", fontSize:"11px", color:"#475569", marginTop:"7px" }}>
-              Your choice updates your Bayesian preference weights
-            </p>
+    // Bottom action bar — changes based on tripState
+    const actionBar = isNavigating ? (
+      // Navigating state: show "navigating" status + new trip button
+      <div style={{ display:"flex", flexDirection:"column", gap:"8px",
+        padding:"12px 14px", borderTop:"1px solid #1e3348",
+        background:"#0a1628", flexShrink:0 }}>
+        <div style={{ display:"flex", alignItems:"center", gap:"10px",
+          padding:"10px 12px", background:"#0d2a0d", borderRadius:"10px",
+          border:"1px solid #22c55e40" }}>
+          <span style={{ fontSize:"16px" }}>🧭</span>
+          <div style={{ flex:1 }}>
+            <div style={{ fontSize:"12px", fontWeight:"700", color:"#22c55e" }}>
+              Navigating · {selected?.label}
+            </div>
+            <div style={{ fontSize:"11px", color:"#475569", marginTop:"1px" }}>
+              {selected?.duration} min · {selected?.distanceKm} km
+            </div>
           </div>
-        )}
-      </>
+        </div>
+        <button onClick={startNewTrip} style={{
+          width:"100%", padding:"12px",
+          background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+          border:"none", borderRadius:"12px", color:"#fff",
+          fontSize:"14px", fontWeight:"700", cursor:"pointer",
+          boxShadow:"0 4px 20px #1d4ed840",
+          display:"flex", alignItems:"center", justifyContent:"center", gap:"8px"
+        }}>
+          ＋ New Trip
+        </button>
+      </div>
+    ) : (
+      // Selecting state: show confirm button
+      <div style={{ padding:"12px 14px", borderTop:"1px solid #1e3348",
+        background:"#0a1628", flexShrink:0 }}>
+        <button onClick={confirm} style={{
+          width:"100%", padding:"13px",
+          background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+          border:"none", borderRadius:"12px", color:"#fff",
+          fontSize:"14px", fontWeight:"700", cursor:"pointer",
+          boxShadow:"0 4px 24px #1d4ed840"
+        }}>✓ Go with {selected?.label}</button>
+        <p style={{ textAlign:"center", fontSize:"11px", color:"#475569", margin:"7px 0 0" }}>
+          Your choice updates your Bayesian preference weights
+        </p>
+      </div>
     );
 
-    // Map overlays — bottom position shifts up on mobile to stay above the sheet.
+    // Route list (read-only when navigating)
+    const routeList = (
+      <div style={{ flex:1, overflowY:"auto", padding:"14px",
+        display:"flex", flexDirection:"column", gap:"10px" }}>
+        {routes.map((r,i) => (
+          <RouteCard key={r.id} route={r} isOptimal={i===0}
+            isSelected={selected?.id===r.id}
+            onSelect={isNavigating ? ()=>{} : setSelected} />
+        ))}
+      </div>
+    );
+
     const overlayBottom = isMobile ? "170px" : "12px";
     const mapOverlays = (
       <>
@@ -1023,6 +1026,7 @@ export default function App() {
             <span style={{ fontSize:"13px" }}>{selected.steps[0]?.icon}</span>
             <span style={{ fontSize:"11px", fontWeight:"600", color:"#e2e8f0" }}>{selected.label}</span>
             <span style={{ fontSize:"11px", color:"#475569" }}>· {selected.duration} min</span>
+            {isNavigating && <span style={{ fontSize:"10px", color:"#22c55e", fontWeight:"700" }}>● LIVE</span>}
           </div>
         )}
       </>
@@ -1047,51 +1051,57 @@ export default function App() {
                 {origin} <span style={{ color:"#334155" }}>→</span> {dest}
               </div>
               <div style={{ fontSize:"11px", color:"#475569" }}>
-                {routes.length} routes · Live data · Google Maps
+                {isNavigating
+                  ? "🧭 Navigating · tap map to explore"
+                  : `${routes.length} routes · Live data · Google Maps`}
               </div>
             </div>
           </div>
-          <button onClick={()=>setScreen("main")} style={{ background:"#0d1b2a",
-            border:"1px solid #1e3348", color:"#94a3b8",
-            borderRadius:"8px", padding:"7px 12px", cursor:"pointer", fontSize:"12px" }}>← Back</button>
+          {isNavigating ? (
+            <button onClick={startNewTrip} style={{ background:"#1d4ed8",
+              border:"none", color:"#fff", borderRadius:"8px",
+              padding:"7px 12px", cursor:"pointer", fontSize:"12px", fontWeight:"600" }}>
+              ＋ New Trip
+            </button>
+          ) : (
+            <button onClick={()=>setScreen("main")} style={{ background:"#0d1b2a",
+              border:"1px solid #1e3348", color:"#94a3b8",
+              borderRadius:"8px", padding:"7px 12px", cursor:"pointer", fontSize:"12px" }}>← Back</button>
+          )}
         </div>
 
         {isMobile ? (
-          /* ── MOBILE: full-bleed map + bottom sheet ── */
-          <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
-            <RouteMap route={selected} userLocation={userLocation} bottomPadding={180} />
-            {mapOverlays}
+          <div style={{ flex:1, position:"relative", overflow:"hidden", display:"flex", flexDirection:"column" }}>
+            {/* Map fills everything */}
+            <div style={{ position:"absolute", inset:0 }}>
+              <RouteMap route={selected} userLocation={userLocation} bottomPadding={180} />
+              {mapOverlays}
+            </div>
 
-            {/* Bottom sheet */}
+            {/* Bottom sheet — tap/swipe to expand, collapsed when navigating */}
             <div ref={sheetRef} style={{
               position:"absolute", bottom:0, left:0, right:0,
-              height: sheetOpen ? SHEET_FULL : SHEET_PEEK,
+              height: isNavigating ? "auto" : sheetOpen ? SHEET_FULL : SHEET_PEEK,
               transition:"height 0.3s cubic-bezier(0.4,0,0.2,1)",
-              background:"#0d1b2a",
-              borderTop:"1px solid #1e3348",
-              borderRadius:"16px 16px 0 0",
-              boxShadow:"0 -8px 30px #00000060",
-              display:"flex", flexDirection:"column",
-              overflow:"hidden",
+              background:"#0d1b2a", borderTop:"1px solid #1e3348",
+              borderRadius:"16px 16px 0 0", boxShadow:"0 -8px 30px #00000060",
+              display:"flex", flexDirection:"column", overflow:"hidden",
             }}>
-              {/* Drag handle — tap to toggle, swipe to drag */}
-              <div
-                onClick={() => setSheetOpen(v => !v)}
-                onTouchStart={onDragStart}
-                onTouchMove={onDragMove}
-                onTouchEnd={onDragEnd}
-                style={{ flexShrink:0, padding:"10px 0 6px", cursor:"pointer",
-                  display:"flex", alignItems:"center", justifyContent:"center",
-                  touchAction:"none" }}>
-                <div style={{ width:"36px", height:"4px", borderRadius:"2px", background:"#334155" }} />
-              </div>
-
-              {!sheetOpen ? (
-                /* ── Collapsed: summary + confirm ── */
-                <div style={{ padding:"0 14px 12px", display:"flex", flexDirection:"column", gap:"8px" }}>
-                  {selected && (
-                    <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
-                      <span style={{ fontSize:"22px", flexShrink:0 }}>{selected.steps[0]?.icon}</span>
+              {/* Drag handle — only shown when not navigating; tap to toggle, swipe to drag */}
+              {!isNavigating && (
+                <div
+                  onClick={() => setSheetOpen(v => !v)}
+                  onTouchStart={onDragStart}
+                  onTouchMove={onDragMove}
+                  onTouchEnd={onDragEnd}
+                  style={{ flexShrink:0, padding:"10px 0 4px", cursor:"pointer",
+                    display:"flex", flexDirection:"column", alignItems:"center", gap:"8px",
+                    touchAction:"none" }}>
+                  <div style={{ width:"36px", height:"4px", borderRadius:"2px", background:"#334155" }} />
+                  {!sheetOpen && selected && (
+                    <div style={{ width:"100%", padding:"0 14px 6px",
+                      display:"flex", alignItems:"center", gap:"10px" }}>
+                      <span style={{ fontSize:"22px" }}>{selected.steps[0]?.icon}</span>
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontSize:"13px", fontWeight:"700", color:"#e2e8f0",
                           overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
@@ -1101,53 +1111,26 @@ export default function App() {
                           {selected.duration} min · {routes.length} routes — swipe up for more
                         </div>
                       </div>
-                      <span style={{ color:"#475569", fontSize:"20px", lineHeight:1, flexShrink:0 }}>›</span>
+                      <span style={{ color:"#475569", fontSize:"20px", lineHeight:1 }}>›</span>
                     </div>
-                  )}
-                  {selected && (
-                    <button onClick={confirm} style={{
-                      width:"100%", padding:"11px",
-                      background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
-                      border:"none", borderRadius:"11px", color:"#fff",
-                      fontSize:"13px", fontWeight:"700", cursor:"pointer",
-                      boxShadow:"0 4px 16px #1d4ed840",
-                    }}>✓ Go with {selected.label}</button>
                   )}
                 </div>
-              ) : (
-                /* ── Expanded: scrollable list + pinned confirm ── */
-                <>
-                  <div style={{ flex:1, overflowY:"auto", padding:"4px 14px 0",
-                    display:"flex", flexDirection:"column", gap:"10px" }}>
-                    {routes.map((r,i) => (
-                      <RouteCard key={r.id} route={r} isOptimal={i===0}
-                        isSelected={selected?.id===r.id} onSelect={setSelected} />
-                    ))}
-                  </div>
-                  {selected && (
-                    <div style={{ flexShrink:0, padding:"10px 14px 16px",
-                      borderTop:"1px solid #1e3348", background:"#0d1b2a" }}>
-                      <button onClick={confirm} style={{
-                        width:"100%", padding:"13px",
-                        background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
-                        border:"none", borderRadius:"13px", color:"#fff",
-                        fontSize:"14px", fontWeight:"700", cursor:"pointer",
-                        boxShadow:"0 4px 24px #1d4ed840",
-                      }}>✓ Go with {selected.label}</button>
-                    </div>
-                  )}
-                </>
               )}
+              {!isNavigating && routeList}
+              {actionBar}
             </div>
           </div>
         ) : (
           /* ── DESKTOP: side-by-side ── */
           <div style={{ display:"flex", flex:1, overflow:"hidden" }}>
-            <div style={{ width:"320px", flexShrink:0, overflowY:"auto",
-              borderRight:"1px solid #1e3348", padding:"14px",
-              display:"flex", flexDirection:"column", gap:"10px" }}>
+            {/* Left panel: route list + action bar */}
+            <div style={{ width:"320px", flexShrink:0,
+              borderRight:"1px solid #1e3348",
+              display:"flex", flexDirection:"column", overflow:"hidden" }}>
               {routeList}
+              {actionBar}
             </div>
+            {/* Right: map */}
             <div style={{ flex:1, position:"relative", overflow:"hidden" }}>
               <RouteMap route={selected} userLocation={userLocation} bottomPadding={50} />
               {mapOverlays}
@@ -1166,7 +1149,6 @@ export default function App() {
       backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
       {notif && <Notif {...notif} />}
       <div style={{ maxWidth:"480px", margin:"0 auto", padding:"22px 18px" }}>
-
         <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"26px" }}>
           <div>
             <h1 style={{ fontSize:"22px", fontWeight:"800", color:"#f1f5f9", margin:0, letterSpacing:"-0.02em" }}>
@@ -1193,14 +1175,12 @@ export default function App() {
             <div style={{ flex:1, height:"1px", background:"#1e3348" }} />
           </div>
           <LocInput label="TO" dot="#ef4444" value={dest} onChange={setDest} placeholder="Enter destination address…" />
-
           {error && (
             <div style={{ marginTop:"10px", padding:"9px 12px", background:"#2d1515",
               border:"1px solid #7f1d1d", borderRadius:"9px", fontSize:"12px", color:"#fca5a5" }}>
               ⚠ {error}
             </div>
           )}
-
           <button onClick={search} disabled={!origin||!dest||loading} style={{
             marginTop:"14px", width:"100%", padding:"13px",
             background:(!origin||!dest)?"#1e293b":"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
@@ -1210,9 +1190,7 @@ export default function App() {
             cursor:(!origin||!dest||loading)?"not-allowed":"pointer",
             transition:"all .2s", display:"flex", alignItems:"center", justifyContent:"center", gap:"8px"
           }}>
-            {loading
-              ? <><Spinner />{loadingMsg || "Fetching routes…"}</>
-              : "🔍 Find Routes"}
+            {loading ? <><Spinner />{loadingMsg || "Fetching routes…"}</> : "🔍 Find Routes"}
           </button>
         </div>
 
