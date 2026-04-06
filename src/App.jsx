@@ -1155,7 +1155,7 @@ export default function App() {
                     <div style={{ flex:1, minHeight:0, overflowY:"auto",
                       WebkitOverflowScrolling:"touch",
                       padding:"4px 12px",
-                      paddingBottom:"calc(env(safe-area-inset-bottom, 0px) + 24px)",
+                      paddingBottom:"calc(env(safe-area-inset-bottom, 0px) + 80px)",
                       display:"flex", flexDirection:"column", gap:"10px" }}>
                       {routes.map((r,i) => (
                         <RouteCard key={r.id} route={r} isOptimal={i===0}
