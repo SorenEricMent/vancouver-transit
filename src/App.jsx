@@ -706,6 +706,7 @@ export default function App() {
   const [tripCount,    setTripCount]    = useLocalStorage("vt_tripcount", 0);
   const [notif,        setNotif]        = useState(null);
   const [userLocation, setUserLocation] = useState(null);
+  const [geoError,     setGeoError]     = useState(null);
   const [sheetOpen,    setSheetOpen]    = useState(false);
   const isMobile = useIsMobile();
 
@@ -713,12 +714,18 @@ export default function App() {
   useEffect(() => {
     if (!navigator.geolocation) return;
     const id = navigator.geolocation.watchPosition(
-      pos => setUserLocation({
-        lat:      pos.coords.latitude,
-        lng:      pos.coords.longitude,
-        accuracy: pos.coords.accuracy,
-      }),
-      err => console.warn("Geolocation:", err.message),
+      pos => {
+        setUserLocation({
+          lat:      pos.coords.latitude,
+          lng:      pos.coords.longitude,
+          accuracy: pos.coords.accuracy,
+        });
+        setGeoError(null);
+      },
+      err => {
+        console.warn("Geolocation:", err.message);
+        setGeoError(err.code === 1 ? null : "GPS unavailable");
+      },
       { enableHighAccuracy: true, maximumAge: 15000, timeout: 10000 },
     );
     return () => navigator.geolocation.clearWatch(id);
@@ -949,6 +956,16 @@ export default function App() {
     const overlayBottom = isMobile ? "170px" : "12px";
     const mapOverlays = (
       <>
+        {geoError && (
+          <div style={{ position:"absolute", top:"12px", right:"12px",
+            background:"#1c1400cc", backdropFilter:"blur(6px)",
+            border:"1px solid #78350f", borderRadius:"8px",
+            padding:"5px 10px", pointerEvents:"none",
+            display:"flex", alignItems:"center", gap:"6px" }}>
+            <span style={{ fontSize:"11px" }}>📍</span>
+            <span style={{ fontSize:"11px", color:"#fbbf24" }}>{geoError}</span>
+          </div>
+        )}
         <div style={{ position:"absolute", top:"12px", left:"12px",
           background:"#050d1aee", backdropFilter:"blur(8px)",
           borderRadius:"10px", padding:"8px 12px", border:"1px solid #1e3348",
