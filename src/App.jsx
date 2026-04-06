@@ -708,7 +708,9 @@ export default function App() {
   const [userLocation, setUserLocation] = useState(null);
   const [geoError,     setGeoError]     = useState(null);
   const [sheetOpen,    setSheetOpen]    = useState(false);
-  const isMobile = useIsMobile();
+  const isMobile  = useIsMobile();
+  const sheetRef  = useRef(null);
+  const dragRef   = useRef({ active: false, startY: 0, startH: 0 });
 
   // Request geolocation on mount and watch for updates.
   useEffect(() => {
@@ -925,8 +927,36 @@ export default function App() {
 
   // ── RESULTS ──────────────────────────────────────────────────────────────────
   if (screen === "results") {
-    const SHEET_PEEK = "158px";
-    const SHEET_FULL = "70vh";
+    const SHEET_PEEK_PX = 176;
+    const SHEET_FULL_PX = Math.round(window.innerHeight * 0.70);
+    const SHEET_PEEK    = `${SHEET_PEEK_PX}px`;
+    const SHEET_FULL    = `${SHEET_FULL_PX}px`;
+
+    function onDragStart(e) {
+      const touch = e.touches[0];
+      dragRef.current = {
+        active: true,
+        startY: touch.clientY,
+        startH: sheetOpen ? SHEET_FULL_PX : SHEET_PEEK_PX,
+      };
+      if (sheetRef.current) sheetRef.current.style.transition = "none";
+    }
+    function onDragMove(e) {
+      if (!dragRef.current.active) return;
+      const delta  = e.touches[0].clientY - dragRef.current.startY;
+      const newH   = Math.max(80, Math.min(window.innerHeight * 0.92,
+                       dragRef.current.startH - delta));
+      if (sheetRef.current) sheetRef.current.style.height = `${newH}px`;
+    }
+    function onDragEnd(e) {
+      if (!dragRef.current.active) return;
+      dragRef.current.active = false;
+      if (sheetRef.current) sheetRef.current.style.transition = "";
+      const delta = e.changedTouches[0].clientY - dragRef.current.startY;
+      if      (delta < -40 && !sheetOpen) setSheetOpen(true);
+      else if (delta >  40 &&  sheetOpen) setSheetOpen(false);
+      // else snap back — React re-applies the correct height on next render
+    }
 
     // Shared route list + confirm button used in both layouts.
     const routeList = (
@@ -1033,7 +1063,7 @@ export default function App() {
             {mapOverlays}
 
             {/* Bottom sheet */}
-            <div style={{
+            <div ref={sheetRef} style={{
               position:"absolute", bottom:0, left:0, right:0,
               height: sheetOpen ? SHEET_FULL : SHEET_PEEK,
               transition:"height 0.3s cubic-bezier(0.4,0,0.2,1)",
@@ -1044,35 +1074,70 @@ export default function App() {
               display:"flex", flexDirection:"column",
               overflow:"hidden",
             }}>
-              {/* Drag handle — tapping toggles sheet */}
-              <div onClick={() => setSheetOpen(v => !v)}
-                style={{ flexShrink:0, padding:"10px 0 4px", cursor:"pointer",
-                  display:"flex", flexDirection:"column", alignItems:"center", gap:"8px" }}>
+              {/* Drag handle — tap to toggle, swipe to drag */}
+              <div
+                onClick={() => setSheetOpen(v => !v)}
+                onTouchStart={onDragStart}
+                onTouchMove={onDragMove}
+                onTouchEnd={onDragEnd}
+                style={{ flexShrink:0, padding:"10px 0 6px", cursor:"pointer",
+                  display:"flex", alignItems:"center", justifyContent:"center",
+                  touchAction:"none" }}>
                 <div style={{ width:"36px", height:"4px", borderRadius:"2px", background:"#334155" }} />
-                {/* Peek row: selected route summary when collapsed */}
-                {!sheetOpen && selected && (
-                  <div style={{ width:"100%", padding:"0 14px 6px",
-                    display:"flex", alignItems:"center", gap:"10px" }}>
-                    <span style={{ fontSize:"22px" }}>{selected.steps[0]?.icon}</span>
-                    <div style={{ flex:1, minWidth:0 }}>
-                      <div style={{ fontSize:"13px", fontWeight:"700", color:"#e2e8f0",
-                        overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
-                        {selected.label}
-                      </div>
-                      <div style={{ fontSize:"11px", color:"#64748b" }}>
-                        {selected.duration} min · {routes.length} routes — tap to expand
-                      </div>
-                    </div>
-                    <span style={{ color:"#475569", fontSize:"20px", lineHeight:1 }}>›</span>
-                  </div>
-                )}
               </div>
 
-              {/* Scrollable route list — only visible when open */}
-              <div style={{ flex:1, overflowY:"auto", padding:"4px 14px 14px",
-                display:"flex", flexDirection:"column", gap:"10px" }}>
-                {routeList}
-              </div>
+              {!sheetOpen ? (
+                /* ── Collapsed: summary + confirm ── */
+                <div style={{ padding:"0 14px 12px", display:"flex", flexDirection:"column", gap:"8px" }}>
+                  {selected && (
+                    <div style={{ display:"flex", alignItems:"center", gap:"10px" }}>
+                      <span style={{ fontSize:"22px", flexShrink:0 }}>{selected.steps[0]?.icon}</span>
+                      <div style={{ flex:1, minWidth:0 }}>
+                        <div style={{ fontSize:"13px", fontWeight:"700", color:"#e2e8f0",
+                          overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
+                          {selected.label}
+                        </div>
+                        <div style={{ fontSize:"11px", color:"#64748b" }}>
+                          {selected.duration} min · {routes.length} routes — swipe up for more
+                        </div>
+                      </div>
+                      <span style={{ color:"#475569", fontSize:"20px", lineHeight:1, flexShrink:0 }}>›</span>
+                    </div>
+                  )}
+                  {selected && (
+                    <button onClick={confirm} style={{
+                      width:"100%", padding:"11px",
+                      background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+                      border:"none", borderRadius:"11px", color:"#fff",
+                      fontSize:"13px", fontWeight:"700", cursor:"pointer",
+                      boxShadow:"0 4px 16px #1d4ed840",
+                    }}>✓ Go with {selected.label}</button>
+                  )}
+                </div>
+              ) : (
+                /* ── Expanded: scrollable list + pinned confirm ── */
+                <>
+                  <div style={{ flex:1, overflowY:"auto", padding:"4px 14px 0",
+                    display:"flex", flexDirection:"column", gap:"10px" }}>
+                    {routes.map((r,i) => (
+                      <RouteCard key={r.id} route={r} isOptimal={i===0}
+                        isSelected={selected?.id===r.id} onSelect={setSelected} />
+                    ))}
+                  </div>
+                  {selected && (
+                    <div style={{ flexShrink:0, padding:"10px 14px 16px",
+                      borderTop:"1px solid #1e3348", background:"#0d1b2a" }}>
+                      <button onClick={confirm} style={{
+                        width:"100%", padding:"13px",
+                        background:"linear-gradient(135deg,#1d4ed8,#0ea5e9)",
+                        border:"none", borderRadius:"13px", color:"#fff",
+                        fontSize:"14px", fontWeight:"700", cursor:"pointer",
+                        boxShadow:"0 4px 24px #1d4ed840",
+                      }}>✓ Go with {selected.label}</button>
+                    </div>
+                  )}
+                </>
+              )}
             </div>
           </div>
         ) : (
