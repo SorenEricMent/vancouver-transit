@@ -897,7 +897,7 @@ export default function App() {
   // ── RESULTS ──────────────────────────────────────────────────────────────────
   if (screen === "results") {
     const isNavigating  = tripState === "navigating";
-    const SHEET_PEEK_PX = 176;
+    const SHEET_PEEK_PX = 160;
     const SHEET_FULL_PX = Math.round(window.innerHeight * 0.70);
     const SHEET_PEEK    = `${SHEET_PEEK_PX}px`;
     const SHEET_FULL    = `${SHEET_FULL_PX}px`;
@@ -913,9 +913,9 @@ export default function App() {
     }
     function onDragMove(e) {
       if (!dragRef.current.active) return;
-      const delta  = e.touches[0].clientY - dragRef.current.startY;
-      const newH   = Math.max(80, Math.min(window.innerHeight * 0.92,
-                       dragRef.current.startH - delta));
+      const delta = e.touches[0].clientY - dragRef.current.startY;
+      const newH  = Math.max(80, Math.min(window.innerHeight * 0.92,
+                      dragRef.current.startH - delta));
       if (sheetRef.current) sheetRef.current.style.height = `${newH}px`;
     }
     function onDragEnd(e) {
@@ -923,8 +923,11 @@ export default function App() {
       dragRef.current.active = false;
       if (sheetRef.current) sheetRef.current.style.transition = "";
       const delta = e.changedTouches[0].clientY - dragRef.current.startY;
-      if      (delta < -40 && !sheetOpen) setSheetOpen(true);
-      else if (delta >  40 &&  sheetOpen) setSheetOpen(false);
+      // Small movement = tap → toggle; large movement = drag → snap
+      if      (Math.abs(delta) < 8)              setSheetOpen(v => !v);
+      else if (delta < -40 && !sheetOpen)        setSheetOpen(true);
+      else if (delta >  40 &&  sheetOpen)        setSheetOpen(false);
+      // else intermediate drag — snap back via React re-render
     }
 
     // Bottom action bar — changes based on tripState
@@ -968,9 +971,11 @@ export default function App() {
           fontSize:"14px", fontWeight:"700", cursor:"pointer",
           boxShadow:"0 4px 24px #1d4ed840"
         }}>✓ Go with {selected?.label}</button>
-        <p style={{ textAlign:"center", fontSize:"11px", color:"#475569", margin:"7px 0 0" }}>
-          Your choice updates your Bayesian preference weights
-        </p>
+        {!isMobile && (
+          <p style={{ textAlign:"center", fontSize:"11px", color:"#475569", margin:"7px 0 0" }}>
+            Your choice updates your Bayesian preference weights
+          </p>
+        )}
       </div>
     );
 
@@ -1087,36 +1092,42 @@ export default function App() {
               borderRadius:"16px 16px 0 0", boxShadow:"0 -8px 30px #00000060",
               display:"flex", flexDirection:"column", overflow:"hidden",
             }}>
-              {/* Drag handle — only shown when not navigating; tap to toggle, swipe to drag */}
               {!isNavigating && (
-                <div
-                  onClick={() => setSheetOpen(v => !v)}
-                  onTouchStart={onDragStart}
-                  onTouchMove={onDragMove}
-                  onTouchEnd={onDragEnd}
-                  style={{ flexShrink:0, padding:"10px 0 4px", cursor:"pointer",
-                    display:"flex", flexDirection:"column", alignItems:"center", gap:"8px",
-                    touchAction:"none" }}>
-                  <div style={{ width:"36px", height:"4px", borderRadius:"2px", background:"#334155" }} />
+                <>
+                  {/* Pill handle — tap (via onDragEnd) or swipe to expand/collapse */}
+                  <div
+                    onTouchStart={onDragStart}
+                    onTouchMove={onDragMove}
+                    onTouchEnd={onDragEnd}
+                    style={{ flexShrink:0, padding:"10px 0 8px", cursor:"pointer",
+                      display:"flex", alignItems:"center", justifyContent:"center",
+                      touchAction:"none" }}>
+                    <div style={{ width:"36px", height:"4px", borderRadius:"2px", background:"#334155" }} />
+                  </div>
+
+                  {/* Peek row — outside handle so width is properly constrained by sheet */}
                   {!sheetOpen && selected && (
-                    <div style={{ width:"100%", padding:"0 14px 6px",
-                      display:"flex", alignItems:"center", gap:"10px" }}>
-                      <span style={{ fontSize:"22px" }}>{selected.steps[0]?.icon}</span>
+                    <div style={{ flexShrink:0, padding:"0 14px 8px",
+                      display:"flex", alignItems:"center", gap:"10px", overflow:"hidden" }}>
+                      <span style={{ fontSize:"20px", flexShrink:0 }}>{selected.steps[0]?.icon}</span>
                       <div style={{ flex:1, minWidth:0 }}>
                         <div style={{ fontSize:"13px", fontWeight:"700", color:"#e2e8f0",
                           overflow:"hidden", textOverflow:"ellipsis", whiteSpace:"nowrap" }}>
                           {selected.label}
                         </div>
-                        <div style={{ fontSize:"11px", color:"#64748b" }}>
-                          {selected.duration} min · {routes.length} routes — swipe up for more
+                        <div style={{ fontSize:"11px", color:"#64748b", marginTop:"1px" }}>
+                          {selected.duration} min · {routes.length} routes — swipe up
                         </div>
                       </div>
-                      <span style={{ color:"#475569", fontSize:"20px", lineHeight:1 }}>›</span>
+                      <span style={{ color:"#475569", fontSize:"18px", flexShrink:0 }}>›</span>
                     </div>
                   )}
-                </div>
+
+                  {/* Route list — only rendered when expanded */}
+                  {sheetOpen && routeList}
+                </>
               )}
-              {!isNavigating && routeList}
+              {/* Action bar always visible: confirm button or navigating status */}
               {actionBar}
             </div>
           </div>
