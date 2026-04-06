@@ -1098,21 +1098,30 @@ export default function App() {
               {mapOverlays}
             </div>
 
-            {/* Bottom sheet — tap/swipe to expand, collapsed when navigating */}
-            <div ref={sheetRef} style={{
+            {/* Floating navigating prompt — shown above safe area when navigating */}
+            {isNavigating && (
+              <div style={{
+                position:"absolute", bottom:"calc(env(safe-area-inset-bottom, 0px) + 16px)",
+                left:"14px", right:"14px",
+                background:"#0d1b2a", border:"1px solid #1e3348",
+                borderRadius:"16px", boxShadow:"0 8px 32px #00000080",
+                overflow:"hidden",
+              }}>
+                {actionBar}
+              </div>
+            )}
+
+            {/* Bottom sheet — tap/swipe to expand; hidden when navigating */}
+            {!isNavigating && <div ref={sheetRef} style={{
               position:"absolute", bottom:0, left:0, right:0,
-              height: isNavigating ? "auto" : sheetOpen ? SHEET_FULL : SHEET_PEEK,
+              height: sheetOpen ? SHEET_FULL : SHEET_PEEK,
               transition:"height 0.3s cubic-bezier(0.4,0,0.2,1)",
               background:"#0d1b2a", borderTop:"1px solid #1e3348",
               borderRadius:"16px 16px 0 0", boxShadow:"0 -8px 30px #00000060",
               display:"flex", flexDirection:"column", overflow:"hidden",
             }}>
-              {isNavigating ? (
-                /* Navigating: just the action bar */
-                actionBar
-              ) : (
-                <>
-                  {/* Pill handle — tap or swipe to expand/collapse */}
+              <>
+                {/* Pill handle — tap or swipe to expand/collapse */}
                   <div
                     onTouchStart={onDragStart}
                     onTouchMove={onDragMove}
@@ -1145,7 +1154,8 @@ export default function App() {
                     /* Expanded: scrollable list; confirm button lives inside the selected card */
                     <div style={{ flex:1, minHeight:0, overflowY:"auto",
                       WebkitOverflowScrolling:"touch",
-                      padding:"4px 12px 16px",
+                      padding:"4px 12px",
+                      paddingBottom:"calc(env(safe-area-inset-bottom, 0px) + 24px)",
                       display:"flex", flexDirection:"column", gap:"10px" }}>
                       {routes.map((r,i) => (
                         <RouteCard key={r.id} route={r} isOptimal={i===0}
@@ -1156,8 +1166,7 @@ export default function App() {
                     </div>
                   )}
                 </>
-              )}
-            </div>
+            </div>}
           </div>
         ) : (
           /* ── DESKTOP: side-by-side ── */
