@@ -326,7 +326,7 @@ function RouteMap({ route, userLocation, bottomPadding = 50 }) {
     map.fitBounds(bounds, { top: 50, right: 50, bottom: bottomPadding, left: 50 });
 
     return () => overlays.forEach(o => o.setMap(null));
-  }, [ready, route]);
+  }, [ready, route, bottomPadding]);
 
   useEffect(() => {
     if (!ready || !userLocation || !mapRef.current) return;
@@ -396,7 +396,7 @@ function RouteCard({ route, isOptimal, isSelected, onSelect, onConfirm }) {
       background: isSelected?"#0f2235":"#0d1b2a",
       border:`1.5px solid ${isSelected?col:isOptimal?`${col}55`:"#1e3348"}`,
       borderRadius:"12px", padding:"10px 12px", cursor:"pointer",
-      transition:"all .2s", position:"relative", overflow:"hidden",
+      transition:"all .2s", position:"relative",
       boxShadow: isSelected?`0 0 22px ${col}30`:isOptimal?`0 0 12px ${col}15`:"none",
     }}>
       {isOptimal && (
@@ -1091,7 +1091,8 @@ export default function App() {
           <div style={{ flex:1, position:"relative", overflow:"hidden", display:"flex", flexDirection:"column" }}>
             {/* Map fills everything */}
             <div style={{ position:"absolute", inset:0 }}>
-              <RouteMap route={selected} userLocation={userLocation} bottomPadding={180} />
+              <RouteMap route={selected} userLocation={userLocation}
+                bottomPadding={sheetOpen ? SHEET_FULL_PX + 20 : SHEET_PEEK_PX + 20} />
               {mapOverlays}
             </div>
 
@@ -1140,7 +1141,9 @@ export default function App() {
                     )
                   ) : (
                     /* Expanded: scrollable list; confirm button lives inside the selected card */
-                    <div style={{ flex:1, overflowY:"auto", padding:"4px 12px 16px",
+                    <div style={{ flex:1, minHeight:0, overflowY:"auto",
+                      WebkitOverflowScrolling:"touch",
+                      padding:"4px 12px 16px",
                       display:"flex", flexDirection:"column", gap:"10px" }}>
                       {routes.map((r,i) => (
                         <RouteCard key={r.id} route={r} isOptimal={i===0}
