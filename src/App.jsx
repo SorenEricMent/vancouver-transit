@@ -781,7 +781,8 @@ export default function App() {
   if (screen === "setup") return (
     <div style={{ minHeight:"100vh", background:"#050d1a", display:"flex", alignItems:"center",
       justifyContent:"center", padding:"20px", fontFamily:"'DM Sans',sans-serif",
-      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
+      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)",
+      overflowY:"auto", WebkitOverflowScrolling:"touch" }}>
       <div style={{ width:"100%", maxWidth:"420px" }}>
         <div style={{ textAlign:"center", marginBottom:"28px" }}>
           <div style={{ display:"inline-flex", alignItems:"center", justifyContent:"center",
@@ -1194,7 +1195,8 @@ export default function App() {
   // ── MAIN ─────────────────────────────────────────────────────────────────────
   return (
     <div style={{ minHeight:"100vh", background:"#050d1a", fontFamily:"'DM Sans',sans-serif",
-      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)" }}>
+      backgroundImage:"radial-gradient(ellipse at 20% 50%,#0d2040 0%,transparent 60%)",
+      overflowY:"auto", WebkitOverflowScrolling:"touch" }}>
       {notif && <Notif {...notif} />}
       <div style={{ maxWidth:"480px", margin:"0 auto", padding:"22px 18px" }}>
         <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:"26px" }}>
