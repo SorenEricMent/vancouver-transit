@@ -685,6 +685,7 @@ export default function App() {
   const sheetRef  = useRef(null);
   const dragRef   = useRef({ active: false, startY: 0, startH: 0 });
 
+  const geoFilledRef = useRef(false);
   useEffect(() => {
     if (!navigator.geolocation) return;
     const id = navigator.geolocation.watchPosition(
@@ -695,6 +696,19 @@ export default function App() {
           accuracy: pos.coords.accuracy,
         });
         setGeoError(null);
+        // Auto-fill origin with reverse-geocoded address on first fix
+        if (!geoFilledRef.current) {
+          geoFilledRef.current = true;
+          const latlng = `${pos.coords.latitude},${pos.coords.longitude}`;
+          fetch(`/maps-api/maps/api/geocode/json?latlng=${latlng}&key=${GOOGLE_KEY}`)
+            .then(r => r.json())
+            .then(data => {
+              if (data.results?.[0]) {
+                setOrigin(prev => prev ? prev : data.results[0].formatted_address);
+              }
+            })
+            .catch(() => {});
+        }
       },
       err => {
         console.warn("Geolocation:", err.message);
